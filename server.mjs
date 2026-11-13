@@ -2030,4 +2030,7 @@ server.listen(PORT, '127.0.0.1', () => {
       const hasFile = fs.existsSync(transcriptFile(p, s.uuid));
       startSession(p, { sid: s.sid, name: s.name, effort: s.effort, model: s.model, resume: hasFile ? s.uuid : null, main: s.main, account: s.account });
       console.log(`resumed tab ${s.name}`);
-    }, dela
+    }, delay);
+    delay += 4000;
+  }
+});
