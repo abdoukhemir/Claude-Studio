@@ -1,0 +1,27 @@
+{
+ "updated": "2026-10-24T16:27:33.038506+00:00",
+ "now": "Your 4 zombies are in the game, animated, with logical sizes (walker, runner, exploder, tank; the boss is a giant tank). Ready to try.",
+ "next": [
+  "Your playtest",
+  "Other guns (pistol, shotgun, machine gun, rocket launcher)"
+ ],
+ "done": [
+  "Agreed the game design: landscape, one joystick, all clones auto-aim at the nearest zombie",
+  "Chose the engine: Godot 4.5.1 (lightweight renderer for old phones)",
+  "Project set up: Godot settings, folders, tests, helper scripts, README and CLAUDE.md",
+  "Installed Blender 5.2 and Godot's export templates; the browser build works",
+  "Playable prototype: one-joystick swarm, auto-aim at nearest zombie, 4 weapons via crates, +N orbs, 5 waves with ring attacks, boss with health bar, win/lose screens",
+  "Performance: worst case (120 clones, 500 zombies) about 3 ms per frame on this PC",
+  "Bot that plays the whole level, used to check the level flow and balance",
+  "v0.2: 8 growing waves (~7 min), zombies always spawn off screen, lone soldiers to rescue (+1, later +3/+5)",
+  "v0.2: Exploder zombie, power-ups (Rapid fire, Shield, Freeze, Airstrike), explosive barrels, enraged boss",
+  "v0.2: coins, main menu, upgrade shop, levels that get harder, pause menu, screen shake, edge arrows, sound effects",
+  "v0.3: animated Quaternius characters (soldiers with real guns, 3 zombie models, boss) baked for old phones",
+  "v0.3: real recorded sound effects (CC0), zombie groans, muzzle flashes",
+  "v0.3: soldiers rarer early, shield countdown, closer camera",
+  "Your soldier and 4 zombies turned into coloured, phone-ready 3D models (local Hunyuan3D + Blender)",
+  "Soldier v2 animated (rigid pieces: run, shoot, hop) and in the game with the rifle",
+  "Zombie directions per level (1 side on level 1 up to 4 sides + rings), wider camera that zooms out with the swarm",
+  "User's zombies in the game: walker 1.2, runner 1.3, exploder 1.25, tank 1.9, boss ~3.6 (soldier 1.05)"
+ ]
+}

@@ -1,0 +1,45 @@
+﻿<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Remote access · Claude Studio</title>
+<link rel="stylesheet" href="studio.css?v=1794562251" />
+</head>
+<body>
+<div class="hub" style="max-width:520px">
+  <a class="btn ghost small" href="./">Back to projects</a>
+  <h1 style="margin:16px 0 6px">Remote access</h1>
+  <p class="muted" id="info">Loading…</p>
+  <form class="card" id="form" style="padding:20px;display:grid;gap:12px">
+    <label class="field">New password
+      <input type="password" id="p1" autocomplete="new-password" minlength="8" required />
+      <span class="hint">At least 8 characters. Changing it logs out every phone and browser.</span>
+    </label>
+    <label class="field">Type it again
+      <input type="password" id="p2" autocomplete="new-password" minlength="8" required />
+    </label>
+    <div class="muted small" id="msg"></div>
+    <button class="btn primary" id="save">Save the password</button>
+  </form>
+</div>
+<script src="common.js?v=1794562251"></script>
+<script>
+  // This page only opens on the PC: it sets the password for the internet address.
+  api('/api/remote/status').then((s) => {
+    $('#info').innerHTML = `From the internet (${s.hosts.map((h) => `<b>https://${esc(h)}</b>`).join(', ')}), Studio asks for <b>${esc(s.email)}</b> and this password. ${s.passwordSet ? 'A password is set; you can change it below.' : '<b>No password yet</b>: set one below.'}`;
+  }).catch((e) => ($('#info').textContent = e.message));
+  $('#form').onsubmit = async (e) => {
+    e.preventDefault();
+    if ($('#p1').value !== $('#p2').value) return void ($('#msg').textContent = 'The two passwords are not the same.');
+    try {
+      await api('/api/remote/password', { method: 'POST', body: { password: $('#p1').value } });
+      $('#msg').textContent = 'Saved. Use it on your phone with the email above.';
+      $('#p1').value = $('#p2').value = '';
+    } catch (err) {
+      $('#msg').textContent = err.message;
+    }
+  };
+</script>
+</body>
+</html>

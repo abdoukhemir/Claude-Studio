@@ -1,0 +1,2033 @@
+// Claude Studio: one local workspace for all projects. The start page lists the projects; each
+// project gets its own workspace with several Claude sessions (tabs), helper agents, a friendly
+// file browser, rendered docs and panels that fit the project (phone, preview, skills...).
+// Run: node server.mjs, then open http://localhost:4600   (listens on 127.0.0.1 only)
+import crypto from 'node:crypto';
+import { execFile, spawn } from 'node:child_process';
+import fs from 'node:fs';
+import http from 'node:http';
+import os from 'node:os';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+import pty from '@lydell/node-pty';
+import express from 'express';
+import WebSocket, { WebSocketServer } from 'ws';
+import { createRequire } from 'node:module';
+const { Terminal: ScreenCopy } = createRequire(import.meta.url)('@xterm/headless');
+const { SerializeAddon } = createRequire(import.meta.url)('@xterm/addon-serialize');
+
+import { CLAUDE_PROJECTS, Transcript, sessionTitle, slugOf } from './transcript.mjs';
+import { openBrowserProfile } from './tools/launch-browser.mjs';
+import * as Phone from './tools/phone-lib.mjs';
+import childProcess from 'node:child_process';
+
+// node-pty and helper processes start without hiding window flags on Windows.
+// Ensure windowsHide: true is active on all child process spawns to prevent popup/flashing windows.
+const forkShown = childProcess.fork;
+childProcess.fork = (mod, args, opts) => (Array.isArray(args) ? forkShown(mod, args, { windowsHide: true, ...opts }) : forkShown(mod, { windowsHide: true, ...args }));
+const spawnShown = childProcess.spawn;
+childProcess.spawn = (cmd, args, opts) => (Array.isArray(args) ? spawnShown(cmd, args, { windowsHide: true, ...opts }) : spawnShown(cmd, { windowsHide: true, ...args }));
+
+const HERE = path.dirname(fileURLToPath(import.meta.url));
+const DATA = path.join(HERE, 'data');
+// Claude's phone tools (tools/phone-mcp.mjs): every tab gets them, without permission prompts.
+const MCP_PHONE = path.join(DATA, 'mcp-phone.json');
+fs.mkdirSync(DATA, { recursive: true });
+fs.writeFileSync(MCP_PHONE, JSON.stringify({ mcpServers: { phone: { type: 'stdio', command: process.execPath, args: [path.join(HERE, 'tools', 'phone-mcp.mjs').split(path.sep).join('/')] } } }));
+const REGISTRY = path.join(DATA, 'projects.json');
+const PORT = +(process.env.PORT || 4600);
+// Only the real Studio (port 4600) reopens tabs, switches accounts and checks logins; a copy started
+// on another port for testing must never start a second Claude on a conversation.
+const MAIN_INSTANCE = PORT === 4600;
+const CLAUDE = path.join(os.homedir(), '.local/bin/claude.exe');
+const HELPER = 'http://127.0.0.1:4548';
+const ADB = path.join(os.homedir(), 'AppData/Local/Android/Sdk/platform-tools/adb.exe');
+const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
+// Aliases, or any full Claude model id (as the /model menu lists them), with an optional [1m].
+const MODELS = { includes: (m) => /^(opus|sonnet|haiku|fable|claude-[a-z]+-[0-9]+(-[0-9]+)?(\[1m\])?)$/.test(m) };
+const SKIP_DIRS = new Set(['node_modules', '.git', '.expo', '.gradle', 'build', 'dist', '.next', '.cache', '__pycache__', '.venv', 'venv', '.idea', 'Pods', '.turbo']);
+
+/** Full modular element / panel catalog. Any project can have any elements. */
+const PANEL_CATALOG = [
+  { id: 'overview', label: 'Overview', icon: 'overview', desc: 'Mission brief, goals, live status, and stack insights' },
+  { id: 'board', label: 'Neural Board', icon: 'board', desc: 'Infinite architecture canvas & planning whiteboard' },
+  { id: 'preview', label: 'Live Preview', icon: 'preview', desc: 'Interactive responsive web viewport (desktop, tablet, mobile)' },
+  { id: 'phone', label: 'Mobile Emulator', icon: 'phone', desc: 'Android device mirror with touch, logs, and apk runner' },
+  { id: 'files', label: 'File Explorer', icon: 'files', desc: 'Interactive tree with quick search and syntax viewer' },
+  { id: 'git', label: 'Git Radar', icon: 'git', desc: 'Branch status, uncommitted diffs, and commit history' },
+  { id: 'agents', label: 'Agent Matrix', icon: 'agents', desc: 'Subagent swarm cards and helper communication' },
+  { id: 'docs', label: 'Knowledge Base', icon: 'docs', desc: 'Markdown documentation viewer with instant search' },
+  { id: 'skills', label: 'Skills & MCP', icon: 'skills', desc: 'Active MCP tools, capabilities, and plugin switches' },
+  { id: 'notes', label: 'AI Scratchpad', icon: 'notes', desc: 'Shared working memory, instructions, and prompt drafts' },
+  { id: 'sysmon', label: 'Telemetry', icon: 'sysmon', desc: 'System resources, active sessions, and token stats' },
+  { id: 'env', label: 'Env Matrix', icon: 'env', desc: 'Secure environment variable inspector and secrets' },
+];
+
+const DEFAULT_PANELS = ['overview', 'board', 'preview', 'files', 'git', 'agents', 'skills', 'notes', 'sysmon'];
+
+fs.mkdirSync(DATA, { recursive: true });
+const readJson = (f, d) => {
+  try {
+    return JSON.parse(fs.readFileSync(f, 'utf8'));
+  } catch {
+    return d;
+  }
+};
+const writeJson = (f, v) => {
+  fs.mkdirSync(path.dirname(f), { recursive: true });
+  fs.writeFileSync(f, JSON.stringify(v, null, 1));
+};
+const projects = () => readJson(REGISTRY, []);
+const project = (id) => projects().find((p) => p.id === id);
+const dataDir = (p) => path.join(DATA, p.id);
+const statusFile = (p) => p.statusFile ?? path.join(dataDir(p), 'status.json');
+const agentsDir = (p) => p.agentsDir ?? path.join(dataDir(p), 'agents');
+const workspaceOf = (p) => {
+  const wsFile = path.join(dataDir(p), 'workspace.json');
+  const w = readJson(wsFile, {});
+  const panels = Array.isArray(w.panels) && w.panels.length > 0
+    ? w.panels.filter((id) => PANEL_CATALOG.some((c) => c.id === id))
+    : DEFAULT_PANELS;
+  return { layout: 'split', previewUrl: '', ...w, panels };
+};
+const claudeDir = (p) => path.join(CLAUDE_PROJECTS, slugOf(p.path));
+const transcriptFile = (p, uuid) => path.join(claudeDir(p), `${uuid}.jsonl`);
+
+const app = express();
+
+// ---------- remote access (Cloudflare Tunnel + Cloudflare Access) ----------
+// Requests from this PC (localhost) pass as before. Requests that come through the tunnel (they
+// carry Cloudflare headers, or a non-local host name) must carry a valid Cloudflare Access login
+// token (Cf-Access-Jwt-Assertion), signed by the team's keys; otherwise they are refused. This is a
+// second lock behind the Access login page. Settings: data/remote.json
+//   {"team": "abdoukh.cloudflareaccess.com", "aud": "<application AUD tag, optional>", "hosts": ["claude.abderrahmenkhemir.me"]}
+const REMOTE = path.join(DATA, 'remote.json');
+const remoteCfg = () => readJson(REMOTE, { team: 'abdoukh.cloudflareaccess.com', aud: '', hosts: ['claude.abderrahmenkhemir.me'] });
+const isLocal = (req) => {
+  const host = String(req.headers.host ?? '').split(':')[0];
+  return !req.headers['cf-ray'] && !req.headers['cf-connecting-ip'] && (host === 'localhost' || host === '127.0.0.1');
+};
+let teamKeys = { at: 0, keys: [] };
+async function accessKeys() {
+  if (Date.now() - teamKeys.at < 3600000 && teamKeys.keys.length) return teamKeys.keys;
+  const r = await fetch(`https://${remoteCfg().team}/cdn-cgi/access/certs`, { signal: AbortSignal.timeout(10000) });
+  const j = await r.json();
+  teamKeys = { at: Date.now(), keys: j.keys ?? [] };
+  return teamKeys.keys;
+}
+const b64url = (t) => Buffer.from(t.replace(/-/g, '+').replace(/_/g, '/'), 'base64');
+/** The Access login token is valid: signed by the team, for this team, not expired (and for this app when aud is set). */
+async function validAccess(token) {
+  try {
+    const [h, p, sig] = String(token ?? '').split('.');
+    if (!sig) return null;
+    const header = JSON.parse(b64url(h).toString());
+    const claims = JSON.parse(b64url(p).toString());
+    const jwk = (await accessKeys()).find((k) => k.kid === header.kid);
+    if (!jwk || header.alg !== 'RS256') return null;
+    const ok = crypto.verify('RSA-SHA256', Buffer.from(`${h}.${p}`), crypto.createPublicKey({ key: jwk, format: 'jwk' }), b64url(sig));
+    const cfg = remoteCfg();
+    if (!ok || claims.iss !== `https://${cfg.team}` || claims.exp * 1000 < Date.now()) return null;
+    if (cfg.aud && ![].concat(claims.aud).includes(cfg.aud)) return null;
+    return claims;
+  } catch {
+    return null;
+  }
+}
+const accessToken = (req) => req.headers['cf-access-jwt-assertion'] ?? /(?:^|;\s*)CF_Authorization=([^;]+)/.exec(String(req.headers.cookie ?? ''))?.[1];
+// ---------- simple login for the internet address ----------
+// From this PC Studio opens directly. Through the tunnel, one email (data/remote.json "email") with a
+// password set on this PC (/remote.html, local only) gets a signed cookie for 30 days.
+const COOKIE = 'studio_login';
+const LOGIN_DAYS = 30;
+const remoteSecret = () => {
+  const cfg = remoteCfg();
+  if (cfg.secret) return cfg.secret;
+  const secret = crypto.randomBytes(32).toString('hex');
+  writeJson(REMOTE, { ...cfg, secret });
+  return secret;
+};
+const sign = (data) => crypto.createHmac('sha256', remoteSecret()).update(data).digest('hex');
+const hashPassword = (password, salt) => crypto.scryptSync(String(password), salt, 32).toString('hex');
+function loggedIn(req) {
+  const raw = new RegExp(`(?:^|;\\s*)${COOKIE}=([^;]+)`).exec(String(req.headers.cookie ?? ''))?.[1];
+  if (!raw) return false;
+  const [email, exp, mac] = decodeURIComponent(raw).split('|');
+  const cfg = remoteCfg();
+  // Changing the password (new salt) logs every device out.
+  return email === cfg.email && +exp > Date.now() && mac === sign(`${email}|${exp}|${cfg.salt}`);
+}
+const tries = new Map(); // ip -> { n, until }: slows down password guessing
+const loginPage = (msg = '') => `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Claude Studio</title>
+<style>body{margin:0;min-height:100vh;display:grid;place-items:center;background:#17150f;color:#ece7dc;font:15px/1.5 system-ui,sans-serif}form{width:min(360px,90vw);display:grid;gap:12px;background:#211e18;border:1px solid #3a352c;border-radius:14px;padding:26px}h1{margin:0 0 4px;font-size:22px}input,button{font:inherit;padding:11px 12px;border-radius:10px;border:1px solid #3a352c;background:#17150f;color:inherit}button{background:#e08a55;border-color:#e08a55;color:#fff;font-weight:600;cursor:pointer}.m{color:#e57265;min-height:1.2em;font-size:13px}</style></head>
+<body><form method="post" action="/login"><h1>Claude Studio</h1><input name="email" type="email" placeholder="Email" autocomplete="username" required><input name="password" type="password" placeholder="Password" autocomplete="current-password" required><button>Log in</button><div class="m">${msg}</div></form></body></html>`;
+
+app.post('/login', express.urlencoded({ extended: false }), (req, res) => {
+  const ip = String(req.headers['cf-connecting-ip'] ?? req.socket.remoteAddress);
+  const t = tries.get(ip) ?? { n: 0, until: 0 };
+  if (t.until > Date.now()) return res.status(429).send(loginPage('Too many tries. Wait a few minutes.'));
+  const cfg = remoteCfg();
+  const ok = cfg.email && cfg.salt && String(req.body?.email ?? '').trim().toLowerCase() === cfg.email && hashPassword(req.body?.password ?? '', cfg.salt) === cfg.hash;
+  if (!ok) {
+    t.n++;
+    if (t.n >= 5) Object.assign(t, { n: 0, until: Date.now() + 10 * 60000 });
+    tries.set(ip, t);
+    return res.status(401).send(loginPage(cfg.hash ? 'Wrong email or password.' : 'No password set yet: set one on the PC at http://localhost:4600/remote.html'));
+  }
+  tries.delete(ip);
+  const exp = Date.now() + LOGIN_DAYS * 86400000;
+  const value = encodeURIComponent(`${cfg.email}|${exp}|${sign(`${cfg.email}|${exp}|${cfg.salt}`)}`);
+  res.setHeader('Set-Cookie', `${COOKIE}=${value}; Path=/; Max-Age=${LOGIN_DAYS * 86400}; HttpOnly; Secure; SameSite=Lax`);
+  res.redirect('/');
+});
+app.get('/logout', (_req, res) => (res.setHeader('Set-Cookie', `${COOKIE}=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Lax`), res.redirect('/')));
+
+app.use(async (req, res, next) => {
+  if (isLocal(req)) {
+    req.local = true;
+    return next();
+  }
+  if (loggedIn(req)) return next();
+  if (req.path.startsWith('/api/')) return res.status(401).json({ error: 'Log in first.' });
+  if (req.path === '/remote.html') return res.status(403).send('This page only opens on the PC.');
+  res.status(401).send(loginPage());
+});
+
+/** Sets the password for the internet address (only from this PC). */
+app.post('/api/remote/password', express.json(), (req, res) => {
+  if (!req.local) return res.status(403).json({ error: 'Only from the PC.' });
+  const password = String(req.body?.password ?? '');
+  if (password.length < 8) return res.status(400).json({ error: 'Use at least 8 characters.' });
+  const salt = crypto.randomBytes(16).toString('hex');
+  writeJson(REMOTE, { ...remoteCfg(), salt, hash: hashPassword(password, salt) });
+  res.json({ ok: true });
+});
+app.get('/api/remote/status', (req, res) => {
+  if (!req.local) return res.status(403).json({ error: 'Only from the PC.' });
+  const cfg = remoteCfg();
+  res.json({ email: cfg.email, passwordSet: !!cfg.hash, hosts: cfg.hosts });
+});
+const jsonSmall = express.json({ limit: '2mb' });
+const jsonBig = express.json({ limit: '100mb' });
+app.use((req, res, next) => (/^\/api\/p\/[^/]+\/board$/.test(req.path) ? jsonBig : jsonSmall)(req, res, next));
+
+// Only pages from this server may change things (the sessions are real shells on this machine).
+const ours = (origin) => !origin || origin === `http://localhost:${PORT}` || origin === `http://127.0.0.1:${PORT}` || remoteCfg().hosts.some((h) => origin === `https://${h}`);
+app.use((req, res, next) => (req.method === 'GET' || ours(req.headers.origin) ? next() : res.status(403).json({ error: 'origin' })));
+// Never keep old copies of Studio's own files (phones and Cloudflare cached the old styles).
+app.use(express.static(path.join(HERE, 'public'), { setHeaders: (res) => res.setHeader('Cache-Control', 'no-store') }));
+
+const need = (req, res) => {
+  const p = project(req.params.id);
+  if (!p) res.status(404).json({ error: 'no such project' });
+  return p;
+};
+
+// ---------- projects ----------
+function lastActivity(p) {
+  try {
+    return Math.max(0, ...fs.readdirSync(claudeDir(p)).filter((f) => f.endsWith('.jsonl')).map((f) => fs.statSync(path.join(claudeDir(p), f)).mtimeMs));
+  } catch {
+    return 0;
+  }
+}
+
+app.get('/api/projects', (_req, res) => {
+  res.json(
+    projects().map((p) => {
+      const st = readJson(statusFile(p), {});
+      const live = [...sessions.values()].filter((s) => s.project === p.id && s.pty).length;
+      return { ...p, now: st.now ?? '', active: lastActivity(p), live, exists: fs.existsSync(p.path) };
+    }),
+  );
+});
+
+const slugify = (s) => String(s).toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40) || 'project';
+
+app.post('/api/projects', (req, res) => {
+  const { name, type = 'other', mode = 'new', parent = 'E:/ClaudeCode', folder, description = '', effort = 'high', model = '' } = req.body ?? {};
+  if (!String(name ?? '').trim()) return res.status(400).json({ error: 'The project needs a name.' });
+  const list = projects();
+  let id = slugify(name);
+  for (let n = 2; list.some((p) => p.id === id); n++) id = `${slugify(name)}-${n}`;
+  const dir = mode === 'existing' ? path.resolve(String(folder ?? '')) : path.resolve(String(parent), String(name).replace(/[<>:"/\\|?*]/g, '').trim());
+  if (mode === 'existing' && !fs.existsSync(dir)) return res.status(400).json({ error: `Folder not found: ${dir}` });
+  if (mode === 'new' && fs.existsSync(dir) && fs.readdirSync(dir).length) return res.status(400).json({ error: `That folder already exists and is not empty: ${dir}. Use "Load project" for it.` });
+  fs.mkdirSync(dir, { recursive: true });
+  const p = { id, name: String(name).trim(), type: type || 'custom', path: dir.replace(/\\/g, '/'), description: String(description), created: new Date().toISOString() };
+  writeJson(REGISTRY, [...list, p]);
+  writeJson(statusFile(p), { updated: new Date().toISOString(), now: 'Getting to know the project.', next: [], done: [] });
+  // Initialize default workspace with full customizable panels
+  const wsFile = path.join(dataDir(p), 'workspace.json');
+  const chosenPanels = Array.isArray(req.body?.starterPanels) && req.body.starterPanels.length ? req.body.starterPanels.filter(k => PANEL_CATALOG.some(c => c.id === k)) : DEFAULT_PANELS;
+  if (!fs.existsSync(wsFile)) writeJson(wsFile, { panels: chosenPanels, layout: 'split', previewUrl: '' });
+  fs.mkdirSync(agentsDir(p), { recursive: true });
+  const kickoff = [
+    `This is a ${mode === 'new' ? 'new' : 'existing'} project called "${p.name}", opened in Claude Studio (local AI workspace at http://localhost:${PORT}).`,
+    `Folder: ${p.path}.`,
+    description ? `What it is about: ${description}` : '',
+    mode === 'new'
+      ? 'First talk with me: ask the few questions you really need about the goal, platform and stack (one short message). Then set up the project with everything it needs (structure, config, a README, a CLAUDE.md with the rules we agree on).'
+      : 'First read the project to understand it, then tell me in a few lines what it is, its state, and what you would do next. Ask before changing anything.',
+    `Studio workspace & UI elements for this project (you have full control over the UI):`,
+    `- Progress for me: ${statusFile(p)} as JSON {"updated", "now": one plain sentence, "next": [..], "done": [..]}. Update it whenever the task changes.`,
+    `- Elements & Panels: Custom workspace at ${path.join(dataDir(p), 'workspace.json')}. You can dynamically add or remove panels via REST API:`,
+    `  * GET http://localhost:${PORT}/api/p/${p.id}/panels/catalog -> view all available elements`,
+    `  * POST http://localhost:${PORT}/api/p/${p.id}/panels/add -> {"panel": "preview|board|files|git|notes|sysmon|phone|agents|docs|skills|env"}`,
+    `  * POST http://localhost:${PORT}/api/p/${p.id}/workspace -> {"previewUrl": "http://localhost:<port>", "panels": [...] }`,
+    `- Notes & Working Memory: Read/write http://localhost:${PORT}/api/p/${p.id}/notes or ${path.join(dataDir(p), 'notes.md')}.`,
+    `- Helper agents: When you start one, add a card ${agentsDir(p)}/<name>.json {"name","task","status","now","agentId"}.`,
+    `- Board (whiteboard for architecture & visual planning): ${boardDir(p)}. Read README.md there.`,
+  ]
+    .filter(Boolean)
+    .join('\n');
+  const s = startSession(p, { name: 'Main', effort, model, prompt: kickoff, main: true });
+  res.json({ id, sid: s.sid });
+});
+
+app.delete('/api/projects/:id', async (req, res) => {
+  // Removes the project from Studio. Its folder stays, unless ?trash=1: then it goes to the Recycle
+  // Bin (it can be restored from there).
+  const p = project(req.params.id);
+  if (!p) return res.status(404).json({ error: 'no such project' });
+  for (const s of [...sessions.values()]) if (s.project === p.id) (stopSession(s), sessions.delete(s.sid));
+  if (req.query.trash === '1' && fs.existsSync(p.path)) {
+    // Claude may still hold files open for a moment after it stops.
+    await new Promise((r) => setTimeout(r, 1500));
+    const ps = `Add-Type -AssemblyName Microsoft.VisualBasic; [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteDirectory('${p.path.replace(/'/g, "''")}', 'OnlyErrorDialogs', 'SendToRecycleBin')`;
+    const err = await new Promise((r) => execFile('powershell.exe', ['-NoProfile', '-Command', ps], { windowsHide: true, timeout: 120000 }, (e, _o, se) => r(e ? String(se || e.message).trim() : null)));
+    if (err || fs.existsSync(p.path)) return res.status(500).json({ error: `The folder could not be moved to the Recycle Bin: ${err ?? 'it is still there'}. The project was kept.` });
+  }
+  writeJson(REGISTRY, projects().filter((x) => x.id !== p.id));
+  fs.rmSync(dataDir(p), { recursive: true, force: true });
+  res.json({ ok: true, trashed: req.query.trash === '1' });
+});
+
+// ---------- board ----------
+// A whiteboard per project (Excalidraw in the Board panel), kept as files Claude can use:
+//   scene.json  the board (Excalidraw elements; images live in images/ and are referenced by id)
+//   board.png   a picture of the whole board, made by the page after each change
+//   images/     every image on the board, as normal files
+//   add.json    Claude's inbox: simple shapes the open board adds, then this file is removed
+const boardDir = (p) => path.join(dataDir(p), 'board');
+const BOARD_README = (p) => `# Studio board for "${p.name}"
+
+A shared whiteboard the user sees in the Board panel of Claude Studio. Use it to plan and explain
+concepts with the user: draw, write, add images, and look at what the user drew.
+
+## See the board
+- board.png: a picture of the whole board, updated a few seconds after every change. Read it to see it.
+- images/: every image on the board as a file (read them to see them).
+- scene.json: the exact board (Excalidraw format: "elements" array; images reference images/<fileId>.<ext>).
+
+## Draw on the board
+Write add.json in this folder: a JSON array of simple shapes. The board adds them within a few
+seconds (when the Board panel is open; otherwise as soon as it is opened) and removes add.json.
+Coordinates are in pixels; x grows right, y grows down. Look at board.png and scene.json first to
+place things next to what is there.
+
+  [
+    { "type": "rectangle", "x": 0, "y": 0, "width": 220, "height": 90, "label": { "text": "Login screen" }, "backgroundColor": "#d0ebff" },
+    { "type": "ellipse", "x": 300, "y": 0, "width": 160, "height": 90, "label": { "text": "API" } },
+    { "type": "diamond", "x": 520, "y": 0, "width": 160, "height": 110, "label": { "text": "OK?" } },
+    { "type": "arrow", "x": 220, "y": 45, "width": 80, "height": 0, "label": { "text": "calls" } },
+    { "type": "line", "x": 0, "y": 140, "points": [[0, 0], [400, 0]] },
+    { "type": "text", "x": 0, "y": 160, "text": "Notes: anything, several lines\\nlike this", "fontSize": 20 },
+    { "type": "image", "x": 0, "y": 240, "width": 320, "path": "E:/full/path/to/picture.png" },
+    { "type": "frame", "x": -40, "y": -40, "width": 800, "height": 600, "name": "Version 1" }
+  ]
+
+Optional on any shape: "strokeColor", "backgroundColor", "fillStyle" ("solid", "hachure"),
+"strokeWidth", "strokeStyle" ("dashed"), "roundness": { "type": 3 }, "id" (to refer to it again).
+Arrows can connect shapes: "start": { "id": "<shape id>" }, "end": { "id": "<shape id>" }.
+To clear the board first, write { "clear": true, "elements": [ ...shapes... ] } instead of an array.
+
+## Change or remove what is there
+Edit scene.json directly (keep its format; change "x", "y", "text", colors, or remove elements, or
+set "isDeleted": true). The open board reloads it within a few seconds. Do not edit it while
+add.json is still waiting.
+`;
+function boardOf(p) {
+  const dir = boardDir(p);
+  fs.mkdirSync(path.join(dir, 'images'), { recursive: true });
+  const readme = path.join(dir, 'README.md');
+  if (!fs.existsSync(readme)) fs.writeFileSync(readme, BOARD_README(p));
+  return dir;
+}
+const IMG_TYPES = { png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp', svg: 'image/svg+xml' };
+const mtime = (f) => {
+  try {
+    return fs.statSync(f).mtimeMs;
+  } catch {
+    return 0;
+  }
+};
+/** What the open board polls: when the scene last changed and whether Claude left shapes to add. */
+app.get('/api/p/:id/board/state', (req, res) => {
+  const p = need(req, res);
+  if (!p) return;
+  const dir = boardOf(p);
+  res.json({ version: mtime(path.join(dir, 'scene.json')), inbox: fs.existsSync(path.join(dir, 'add.json')), dir });
+});
+/** The whole board, with its images as data URLs for the page. */
+app.get('/api/p/:id/board', (req, res) => {
+  const p = need(req, res);
+  if (!p) return;
+  const dir = boardOf(p);
+  const scene = readJson(path.join(dir, 'scene.json'), { elements: [] });
+  const files = {};
+  for (const el of scene.elements ?? []) {
+    if (el.type !== 'image' || !el.fileId || files[el.fileId]) continue;
+    const name = fs.readdirSync(path.join(dir, 'images')).find((f) => f.startsWith(`${el.fileId}.`));
+    if (!name) continue;
+    const ext = name.split('.').pop().toLowerCase();
+    files[el.fileId] = { id: el.fileId, mimeType: IMG_TYPES[ext] ?? 'image/png', dataURL: `data:${IMG_TYPES[ext] ?? 'image/png'};base64,${fs.readFileSync(path.join(dir, 'images', name)).toString('base64')}`, created: Date.now() };
+  }
+  res.json({ elements: scene.elements ?? [], appState: scene.appState ?? {}, files, version: mtime(path.join(dir, 'scene.json')), dir });
+});
+/** Saves the board from the page: the scene, new images as files, and the picture of it. */
+app.put('/api/p/:id/board', (req, res) => {
+  const p = need(req, res);
+  if (!p) return;
+  const dir = boardOf(p);
+  const { elements = [], appState = {}, files = {}, png } = req.body ?? {};
+  for (const f of Object.values(files)) {
+    const m = /^data:image\/([a-z+]+);base64,(.+)$/.exec(f?.dataURL ?? '');
+    if (!m || !/^[\w-]+$/.test(f.id)) continue;
+    const ext = m[1] === 'jpeg' ? 'jpg' : m[1] === 'svg+xml' ? 'svg' : m[1];
+    const out = path.join(dir, 'images', `${f.id}.${ext}`);
+    if (!fs.existsSync(out)) fs.writeFileSync(out, Buffer.from(m[2], 'base64'));
+  }
+  const keep = { viewBackgroundColor: appState.viewBackgroundColor, gridSize: appState.gridSize ?? null };
+  writeJson(path.join(dir, 'scene.json'), { type: 'excalidraw', version: 2, source: 'claude-studio', elements, appState: keep });
+  const m = /^data:image\/png;base64,(.+)$/.exec(png ?? '');
+  if (m) fs.writeFileSync(path.join(dir, 'board.png'), Buffer.from(m[1], 'base64'));
+  res.json({ version: mtime(path.join(dir, 'scene.json')) });
+});
+/** Claude's inbox, taken once: images given by path are read and handed over as files. */
+app.post('/api/p/:id/board/take', (req, res) => {
+  const p = need(req, res);
+  if (!p) return;
+  const dir = boardOf(p);
+  const f = path.join(dir, 'add.json');
+  let raw;
+  try {
+    raw = JSON.parse(fs.readFileSync(f, 'utf8'));
+  } catch (e) {
+    if (!fs.existsSync(f)) return res.json({ elements: [] });
+    fs.renameSync(f, path.join(dir, 'add.error.json'));
+    fs.writeFileSync(path.join(dir, 'add.error.txt'), `add.json was not valid JSON: ${e.message}\n`);
+    return res.json({ elements: [], error: 'add.json was not valid JSON (see add.error.txt)' });
+  }
+  fs.rmSync(f, { force: true });
+  const list = Array.isArray(raw) ? raw : raw.elements ?? [];
+  const files = {};
+  const elements = [];
+  for (const el of list) {
+    if (el?.type === 'image') {
+      const src = String(el.path ?? '');
+      const ext = path.extname(src).slice(1).toLowerCase();
+      if (!IMG_TYPES[ext] || !fs.existsSync(src)) continue;
+      const id = crypto.createHash('sha1').update(fs.readFileSync(src)).digest('hex').slice(0, 20);
+      fs.copyFileSync(src, path.join(dir, 'images', `${id}.${ext}`));
+      files[id] = { id, mimeType: IMG_TYPES[ext], dataURL: `data:${IMG_TYPES[ext]};base64,${fs.readFileSync(src).toString('base64')}`, created: Date.now() };
+      const { path: _p, ...rest } = el;
+      elements.push({ ...rest, fileId: id });
+    } else if (el && typeof el === 'object') elements.push(el);
+  }
+  res.json({ elements, files, clear: !Array.isArray(raw) && !!raw.clear });
+});
+
+app.get('/api/p/:id', (req, res) => {
+  const p = need(req, res);
+  if (p) res.json({ ...p, workspace: workspaceOf(p), dataDir: dataDir(p) });
+});
+
+app.get('/api/p/:id/status', (req, res) => {
+  const p = need(req, res);
+  if (p) res.json(readJson(statusFile(p), {}));
+});
+
+/** Panel catalog: lists all modular elements Studio supports */
+app.get('/api/p/:id/panels/catalog', (_req, res) => {
+  res.json({ catalog: PANEL_CATALOG, items: PANEL_CATALOG });
+});
+
+/** Workspace configuration for this project */
+app.get('/api/p/:id/workspace', (req, res) => {
+  const p = need(req, res);
+  if (p) res.json(workspaceOf(p));
+});
+
+/** Update workspace configuration (layout, previewUrl, etc.) */
+app.post('/api/p/:id/workspace', (req, res) => {
+  const p = need(req, res);
+  if (!p) return;
+  const current = workspaceOf(p);
+  const next = { ...current, ...(req.body ?? {}) };
+  // Validate panels if provided
+  if (Array.isArray(req.body?.panels)) {
+    next.panels = req.body.panels.filter((k) => PANEL_CATALOG.some((c) => c.id === k));
+    if (!next.panels.length) next.panels = ['overview'];
+  }
+  writeJson(path.join(dataDir(p), 'workspace.json'), next);
+  res.json(next);
+});
+
+/** Add an element to the project's workspace */
+app.post('/api/p/:id/panels/add', (req, res) => {
+  const p = need(req, res);
+  if (!p) return;
+  const panelId = String(req.body?.panel ?? '').trim();
+  if (!PANEL_CATALOG.some((c) => c.id === panelId)) {
+    return res.status(400).json({ error: `Unknown element type: ${panelId}. Valid types: ${PANEL_CATALOG.map((c) => c.id).join(', ')}` });
+  }
+  const current = workspaceOf(p);
+  const panels = [...current.panels];
+  if (!panels.includes(panelId)) {
+    if (req.body?.position === 'start') panels.unshift(panelId);
+    else if (typeof req.body?.position === 'number') panels.splice(Math.max(0, req.body.position), 0, panelId);
+    else panels.push(panelId);
+  }
+  const next = { ...current, panels };
+  writeJson(path.join(dataDir(p), 'workspace.json'), next);
+  res.json({ ok: true, panels, added: panelId });
+});
+
+/** Remove an element from the project's workspace */
+app.post('/api/p/:id/panels/remove', (req, res) => {
+  const p = need(req, res);
+  if (!p) return;
+  const panelId = String(req.body?.panel ?? '').trim();
+  const current = workspaceOf(p);
+  const panels = current.panels.filter((k) => k !== panelId);
+  if (!panels.length) panels.push('overview'); // keep at least 1 element
+  const next = { ...current, panels };
+  writeJson(path.join(dataDir(p), 'workspace.json'), next);
+  res.json({ ok: true, panels, removed: panelId });
+});
+
+/** Reorder elements in the workspace */
+app.post('/api/p/:id/panels/reorder', (req, res) => {
+  const p = need(req, res);
+  if (!p) return;
+  const list = req.body?.panels || req.body?.order;
+  if (!Array.isArray(list)) return res.status(400).json({ error: 'Expected array of panel IDs in "panels" or "order"' });
+  const valid = list.filter((k) => PANEL_CATALOG.some((c) => c.id === k));
+  if (!valid.length) return res.status(400).json({ error: 'No valid panel IDs provided' });
+  const current = workspaceOf(p);
+  const next = { ...current, panels: valid };
+  writeJson(path.join(dataDir(p), 'workspace.json'), next);
+  res.json({ ok: true, panels: valid });
+});
+
+/** Git Radar: status, branches, diff summary */
+app.get('/api/p/:id/git', (req, res) => {
+  const p = need(req, res);
+  if (!p) return;
+  execFile('git', ['status', '--porcelain=v1', '-b'], { cwd: p.path, windowsHide: true, timeout: 5000 }, (err, out) => {
+    if (err) return res.json({ isRepo: false, isGit: false, branch: '', changed: [], changes: [], commits: [] });
+    const lines = String(out).split(/\r?\n/).filter(Boolean);
+    const branchLine = lines[0] ?? '';
+    const branchMatch = branchLine.match(/^##\s+([^\s.]+)/);
+    const branch = branchMatch ? branchMatch[1] : 'HEAD';
+    const changed = lines.slice(1).map((l) => {
+      const code = l.slice(0, 2).trim();
+      const filePath = l.slice(3).trim();
+      return {
+        status: code,
+        code,
+        file: filePath,
+        path: filePath,
+      };
+    });
+
+    execFile('git', ['log', '-n', '10', '--pretty=format:%h|%an|%ar|%s'], { cwd: p.path, windowsHide: true, timeout: 5000 }, (_e, logOut) => {
+      const commits = String(logOut || '').split(/\r?\n/).filter(Boolean).map((line) => {
+        const [hash, author, date, message] = line.split('|');
+        return { hash, author, date, rel: date, message, subject: message };
+      });
+      res.json({
+        isRepo: true,
+        isGit: true,
+        branch,
+        clean: changed.length === 0,
+        changed,
+        changes: changed,
+        commits,
+      });
+    });
+  });
+});
+
+/** Scratchpad / working memory */
+app.get('/api/p/:id/notes', (req, res) => {
+  const p = need(req, res);
+  if (!p) return;
+  const file = path.join(dataDir(p), 'notes.md');
+  const content = fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : `# ${p.name} - Scratchpad\n\nUse this space for instructions, scratch notes, task breakdowns, and prompt templates.\n`;
+  res.json({ content, mtime: fs.existsSync(file) ? fs.statSync(file).mtimeMs : Date.now() });
+});
+
+app.post('/api/p/:id/notes', (req, res) => {
+  const p = need(req, res);
+  if (!p) return;
+  const file = path.join(dataDir(p), 'notes.md');
+  const content = String(req.body?.content ?? '');
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, content, 'utf8');
+  res.json({ ok: true, mtime: Date.now() });
+});
+
+/** Environment & secrets matrix */
+app.get('/api/p/:id/env', (req, res) => {
+  const p = need(req, res);
+  if (!p) return;
+  const envCandidates = ['.env', '.env.local', '.env.development'];
+  const found = [];
+  const vars = [];
+  for (const name of envCandidates) {
+    const file = path.join(p.path, name);
+    if (!fs.existsSync(file)) continue;
+    found.push(name);
+    try {
+      const lines = fs.readFileSync(file, 'utf8').split(/\r?\n/);
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed || trimmed.startsWith('#')) continue;
+        const eq = trimmed.indexOf('=');
+        if (eq > 0) {
+          const key = trimmed.slice(0, eq).trim();
+          const val = trimmed.slice(eq + 1).trim().replace(/^['"]|['"]$/g, '');
+          const isSecret = /KEY|SECRET|TOKEN|PASS|AUTH|PWD|API/i.test(key);
+          const masked = val.length > 6 ? `${val.slice(0, 3)}••••${val.slice(-3)}` : '••••••';
+          vars.push({ key, val, value: val, masked, isSecret, file: name });
+        }
+      }
+    } catch {}
+  }
+  res.json({ files: found, vars, variables: vars });
+});
+
+app.post('/api/p/:id/env', (req, res) => {
+  const p = need(req, res);
+  if (!p) return;
+  const { variables, key, val, value, file = '.env' } = req.body ?? {};
+  const target = path.join(p.path, file);
+
+  if (Array.isArray(variables)) {
+    const content = variables.map((v) => `${v.key}=${v.value ?? v.val ?? ''}`).join('\n') + '\n';
+    fs.writeFileSync(target, content, 'utf8');
+    return res.json({ ok: true, count: variables.length });
+  }
+
+  if (!key) return res.status(400).json({ error: 'Key required' });
+  let lines = fs.existsSync(target) ? fs.readFileSync(target, 'utf8').split(/\r?\n/) : [];
+  let updated = false;
+  const actualVal = value ?? val ?? '';
+  lines = lines.map((l) => {
+    if (l.trim().startsWith(`${key}=`)) {
+      updated = true;
+      return `${key}=${actualVal}`;
+    }
+    return l;
+  });
+  if (!updated) lines.push(`${key}=${actualVal}`);
+  fs.writeFileSync(target, lines.join('\n'), 'utf8');
+  res.json({ ok: true });
+});
+
+/** System & Telemetry Diagnostics */
+app.get('/api/p/:id/sysmon', (req, res) => {
+  const p = need(req, res);
+  if (!p) return;
+  const mem = process.memoryUsage();
+  const osCpus = os.cpus().length;
+  const activeSessionsCount = [...sessions.values()].filter((s) => s.project === p.id && s.live).length;
+  const totalSessionsCount = [...sessions.values()].filter((s) => s.project === p.id).length;
+  const uptime = Math.floor(process.uptime());
+  const heapUsedMB = (mem.heapUsed / 1024 / 1024).toFixed(1);
+  const heapTotalMB = (mem.heapTotal / 1024 / 1024).toFixed(1);
+  const rssMB = (mem.rss / 1024 / 1024).toFixed(1);
+  res.json({
+    activeTabs: activeSessionsCount,
+    totalTabs: totalSessionsCount,
+    activeSessionsCount,
+    totalSessionsCount,
+    uptime,
+    cpus: osCpus,
+    memory: {
+      rss: Math.round(mem.rss / 1024 / 1024),
+      heap: Math.round(mem.heapUsed / 1024 / 1024),
+      totalHeap: Math.round(mem.heapTotal / 1024 / 1024),
+      heapUsedMB,
+      heapTotalMB,
+      rssMB,
+      heapUsed: mem.heapUsed,
+      heapTotal: mem.heapTotal,
+      rssBytes: mem.rss,
+    },
+    arch: process.arch,
+    platform: process.platform,
+    nodeVersion: process.version,
+    pid: process.pid,
+  });
+});
+
+// ---------- Claude sessions ----------
+/** sid -> { sid, project, uuid, name, effort, model, pty, buffer, clients:Set, ask, startedAt } */
+const sessions = new Map();
+const sessionsFile = (p) => path.join(dataDir(p), 'sessions.json');
+function saveSessions(p) {
+  writeJson(
+    sessionsFile(p),
+    [...sessions.values()].filter((s) => s.project === p.id && !s.loginFor).map(({ sid, uuid, name, effort, model, main, legacy, account, live }) => ({ sid, uuid, name, effort, model, main, legacy, account, live })),
+  );
+}
+// Tabs from before a restart come back (not running; opening one resumes it).
+for (const p of projects()) for (const s of readJson(sessionsFile(p), [])) sessions.set(s.sid, { ...s, project: p.id, pty: null, buffer: '', clients: new Set(), ask: null });
+
+const ANSI = /\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07]*\x07|\x1b[()][A-Za-z0-9]|\x1b[=>]/g;
+/** The lines Claude's terminal shows right now (from the headless copy of the screen). */
+function screenLines(s) {
+  const t = s.screen;
+  const b = t?.buffer?.active;
+  if (!b) return [];
+  const out = [];
+  for (let i = Math.max(0, b.length - t.rows); i < b.length; i++) out.push(b.getLine(i)?.translateToString(true) ?? '');
+  return out;
+}
+
+/**
+ * Claude's choice prompts (permissions, questions with options), read from the current screen.
+ * A real prompt always has the selection arrow on a numbered option ("❯ 1. Yes"); numbered lists
+ * in Claude's answers have none, so they are never taken for a question.
+ */
+function detectAsk(s) {
+  const lines = screenLines(s).map((l) => l.replace(/[│┃║]/g, ' ').replace(/\s+$/, ''));
+  const OPT = /^\s*(?:[❯›>]\s*)?(\d+)[.)]\s+(.*\S)/;
+  const BORDER = /^[\s─━═╭╮╰╯┌┐└┘-]+$/;
+  let sel = -1;
+  for (let i = lines.length - 1; i >= 0 && sel < 0; i--) if (/^\s*[❯›>]\s*\d+[.)]\s+\S/.test(lines[i])) sel = i;
+  if (sel < 0) return plainMenu(lines, BORDER);
+  if (lines.slice(sel).some((l) => /esc to interrupt/i.test(l))) return null;
+  // The option block: 1, 2, 3... around the selected one; other lines between them describe the option above.
+  let first = sel;
+  for (let i = sel; i >= Math.max(0, sel - 30); i--) {
+    const m = OPT.exec(lines[i]);
+    if (m && m[1] === '1') {
+      first = i;
+      break;
+    }
+  }
+  const options = [];
+  let gap = 0;
+  for (let i = first; i < lines.length; i++) {
+    const m = OPT.exec(lines[i]);
+    if (m && +m[1] === options.length + 1) {
+      options.push({ key: m[1], label: m[2].trim(), desc: '', selected: /^\s*[❯›>]/.test(lines[i]) });
+      gap = 0;
+    } else if (!lines[i].trim() || BORDER.test(lines[i])) {
+      if (options.length && ++gap > 2) break;
+    } else if (options.length) {
+      if (/esc to|enter to|to navigate|tab to/i.test(lines[i])) break;
+      const o = options.at(-1);
+      if (o.desc.length < 240) o.desc = (o.desc + ' ' + lines[i].trim()).trim();
+      if (++gap > 3) break;
+    }
+  }
+  if (options.length < 2 || !options.some((o) => o.selected)) return null;
+  // The question: the lines just above the options (a tool's command, then "Do you want to proceed?").
+  const above = [];
+  for (let i = first - 1; i >= Math.max(0, first - 12); i--) {
+    const l = lines[i].trim();
+    if (BORDER.test(l) && l) {
+      if (above.length) break;
+      continue;
+    }
+    if (!l) {
+      if (above.length >= 2) break;
+      continue;
+    }
+    above.unshift(l);
+  }
+  const qi = above.findLastIndex((l) => /[?:]$/.test(l));
+  const question = (qi >= 0 ? above.splice(qi, 1)[0] : above.pop()) ?? 'Claude asks:';
+  return { question: question.slice(0, 300), context: above.filter((l) => !/^[☐☒✔✓□■]\s/.test(l)).slice(-6).join('\n').slice(0, 800), options: options.slice(0, 9) };
+}
+/**
+ * A menu without numbers ("❯ No, exit" / "  Yes, I trust this folder"), only when its key hint
+ * ("Enter to confirm · Esc to cancel") is right below: the message box also starts with "❯".
+ */
+function plainMenu(lines, BORDER) {
+  const hint = lines.findLastIndex((l) => /enter to (confirm|select|continue)|esc to (cancel|exit|go back)/i.test(l));
+  if (hint < 0) return null;
+  const block = [];
+  let top = hint;
+  for (let i = hint - 1; i >= Math.max(0, hint - 12); i--) {
+    if (!lines[i].trim() || BORDER.test(lines[i])) {
+      if (block.length) break;
+      continue;
+    }
+    if (!/^\s*[❯›>]\s+\S|^\s{2,}\S/.test(lines[i])) break;
+    block.unshift(lines[i]);
+    top = i;
+  }
+  if (block.length < 2 || block.length > 9 || !block.some((l) => /^\s*[❯›>]\s/.test(l))) return null;
+  const options = block.map((l, i) => ({ key: String(i + 1), label: l.replace(/^\s*[❯›>]?\s*/, ''), desc: '', selected: /^\s*[❯›>]\s/.test(l) }));
+  const above = [];
+  for (let i = top - 1; i >= Math.max(0, top - 8); i--) {
+    const l = lines[i].trim();
+    if (BORDER.test(l) && l) {
+      if (above.length) break;
+      continue;
+    }
+    if (!l) {
+      if (above.length >= 2) break;
+      continue;
+    }
+    above.unshift(l);
+  }
+  const qi = above.findLastIndex((l) => /[?:]$/.test(l));
+  const question = (qi >= 0 ? above.splice(qi, 1)[0] : above.pop()) ?? 'Claude asks:';
+  return { question: question.slice(0, 300), context: above.filter((l) => !/^[☐☒✔✓□■]\s/.test(l)).slice(-6).join('\n').slice(0, 800), options };
+}
+/** Re-reads the screen for a prompt shortly after output (the copy parses the output in batches). */
+function scheduleAsk(s) {
+  if (s.askTimer) return;
+  s.askTimer = setTimeout(() => {
+    s.askTimer = null;
+    const ask = detectAsk(s);
+    // The folder trust question is answered by Studio itself (see onData): never shown.
+    s.ask = ask && !ask.options.some((o) => /trust this folder/i.test(o.label)) ? ask : null;
+  }, 150);
+}
+
+const BROWSER_LAUNCHER = path.join(HERE, 'tools', 'studio-browser.cmd');
+const accountBrowserDir = (id) => path.win32.normalize(path.join(os.homedir(), '.claude-browsers', id));
+
+/**
+ * Each Claude starts as if opened from a fresh terminal: no markers from the Claude session that
+ * may have started Studio (they would turn off its conversation file), and a PATH with the tools
+ * installed since.
+ */
+function cleanEnv(account = currentAccount()) {
+  const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => !/^(CLAUDECODE|CLAUDE_CODE|CLAUDE_PID|CLAUDE_EFFORT|CLAUDE_AGENT|CLAUDE_SESSION)/i.test(k)));
+  const extra = [path.join(os.homedir(), 'AppData/Local/claude-mem/bin'), path.join(os.homedir(), '.local/bin')].filter((d) => fs.existsSync(d));
+  const key = Object.keys(env).find((k) => k.toLowerCase() === 'path') ?? 'Path';
+  env[key] = [...extra, env[key] ?? ''].join(path.delimiter);
+  env.FORCE_COLOR = '1';
+  // Each Claude account has its own settings folder (its own saved login); conversations,
+  // skills and plugins are shared between them through folder links.
+  delete env.CLAUDE_CONFIG_DIR;
+  delete env.CLAUDE_CODE_OAUTH_TOKEN;
+  if (account?.dir) env.CLAUDE_CONFIG_DIR = account.dir;
+  // An account can log in with a long-lived key ("claude setup-token", made once by its owner),
+  // saved in token.txt in its folder: no browser sign-in or email code needed.
+  const dir = account?.dir ?? path.join(os.homedir(), '.claude');
+  const keyFile = path.join(dir, 'token.txt');
+  if (fs.existsSync(keyFile)) env.CLAUDE_CODE_OAUTH_TOKEN = fs.readFileSync(keyFile, 'utf8').trim();
+  return env;
+}
+
+// ---------- Claude accounts ----------
+// data/accounts.json: {"current": "main", "list": [{"id", "label", "dir"}]}. dir null = the normal ~/.claude.
+const ACCOUNTS = path.join(DATA, 'accounts.json');
+const accounts = () =>
+  readJson(ACCOUNTS, null) ?? {
+    current: 'main',
+    list: [
+      { id: 'main', label: 'Account 1', dir: null },
+      { id: 'second', label: 'Account 2', dir: path.join(os.homedir(), '.claude-accounts/second').replace(/\\/g, '/') },
+    ],
+  };
+const accountById = (id) => accounts().list.find((a) => a.id === id);
+const currentAccount = () => accountById(accounts().current) ?? accounts().list[0];
+
+// ---------- Credential backup & restore ----------
+// After a successful login, the OAuth tokens from .credentials.json are backed up to
+// data/credential-backups/<account-id>/. If the credentials file disappears (browser profile
+// wiped, token file deleted, accidental logout), the backup is automatically restored.
+const CRED_BACKUPS = path.join(DATA, 'credential-backups');
+
+/** Saves a copy of this account's .credentials.json and .claude.json (email/profile info). */
+function backupCredentials(a) {
+  const dir = a.dir ?? path.join(os.homedir(), '.claude');
+  const credFile = path.join(dir, '.credentials.json');
+  const detailsFile = a.dir ? path.join(a.dir, '.claude.json') : path.join(os.homedir(), '.claude.json');
+  const backupDir = path.join(CRED_BACKUPS, a.id);
+  fs.mkdirSync(backupDir, { recursive: true });
+  try {
+    const cred = readJson(credFile, null);
+    if (cred?.claudeAiOauth?.accessToken) {
+      // Save credentials backup
+      writeJson(path.join(backupDir, 'credentials.json'), cred);
+      // Save account profile info (email, plan, etc.)
+      const details = readJson(detailsFile, null);
+      if (details?.oauthAccount) {
+        writeJson(path.join(backupDir, 'profile.json'), {
+          email: details.oauthAccount.emailAddress,
+          displayName: details.oauthAccount.displayName,
+          fullName: details.oauthAccount.fullName,
+          plan: details.oauthAccount.organizationType,
+          backedUpAt: new Date().toISOString(),
+        });
+      }
+      // Save backup timestamp
+      writeJson(path.join(backupDir, 'meta.json'), {
+        accountId: a.id,
+        label: a.label,
+        backedUpAt: new Date().toISOString(),
+        credentialsFile: credFile,
+        email: details?.oauthAccount?.emailAddress ?? null,
+      });
+    }
+  } catch (err) {
+    console.error(`[backup] Failed to backup credentials for ${a.id}:`, err.message);
+  }
+}
+
+/** Restores .credentials.json from a backup if the live file is missing or has expired tokens.
+ *  Returns true if a restore was performed. */
+function restoreCredentials(a) {
+  const dir = a.dir ?? path.join(os.homedir(), '.claude');
+  const credFile = path.join(dir, '.credentials.json');
+  const backupDir = path.join(CRED_BACKUPS, a.id);
+  const backupFile = path.join(backupDir, 'credentials.json');
+  if (!fs.existsSync(backupFile)) return false;
+  const backup = readJson(backupFile, null);
+  if (!backup?.claudeAiOauth?.refreshToken) return false;
+  // Only restore if the live credentials are missing or have no valid token
+  const live = readJson(credFile, null);
+  if (live?.claudeAiOauth?.accessToken && (live.claudeAiOauth.refreshToken || live.claudeAiOauth.expiresAt > Date.now())) {
+    return false; // Live credentials are fine, no need to restore
+  }
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+    writeJson(credFile, backup);
+    console.log(`[restore] Restored credentials for ${a.id} from backup`);
+    return true;
+  } catch (err) {
+    console.error(`[restore] Failed to restore credentials for ${a.id}:`, err.message);
+    return false;
+  }
+}
+
+/** Returns backup info for an account (or null if no backup exists). */
+function backupInfo(a) {
+  const meta = readJson(path.join(CRED_BACKUPS, a.id, 'meta.json'), null);
+  if (!meta) return null;
+  const profile = readJson(path.join(CRED_BACKUPS, a.id, 'profile.json'), null);
+  return { ...meta, profile };
+}
+
+/** Who an account is logged in as (email only), read from its settings folder. */
+/** The saved login of an account: usable when it has a token that is still valid or can be renewed. */
+function savedLogin(a) {
+  const dir = a.dir ?? path.join(os.homedir(), '.claude');
+  const tokenFile = path.join(dir, 'token.txt');
+  if (fs.existsSync(tokenFile)) {
+    try {
+      const at = fs.statSync(tokenFile).mtimeMs;
+      return { valid: true, at, isToken: true };
+    } catch {}
+  }
+  const file = path.join(dir, '.credentials.json');
+  const o = readJson(file, {})?.claudeAiOauth;
+  let at = 0;
+  try {
+    at = fs.statSync(file).mtimeMs;
+  } catch {}
+  const valid = !!o?.accessToken && (!!o.refreshToken || o.expiresAt > Date.now());
+  return { valid, at };
+}
+function accountInfo(a) {
+  const dir = a.dir ?? path.join(os.homedir(), '.claude');
+  const details = a.dir ? path.join(a.dir, '.claude.json') : path.join(os.homedir(), '.claude.json');
+  const email = readJson(details, {})?.oauthAccount?.emailAddress ?? a.savedEmail ?? null;
+  const tokenFile = path.join(dir, 'token.txt');
+  const hasKey = fs.existsSync(tokenFile);
+  const saved = savedLogin(a);
+  let keyAt = 0;
+  try {
+    keyAt = fs.statSync(tokenFile).mtimeMs;
+  } catch {}
+  let check = authChecks.get(a.id);
+  // The login or the key changed since the last check: check again.
+  if (check && Math.max(saved.at, keyAt) > check.at + 2000) (authChecks.delete(a.id), (check = null));
+  if (!check && MAIN_INSTANCE) checkAccount(a);
+  const loggedIn = check ? check.loggedIn : hasKey || saved.valid;
+  return {
+    id: a.id,
+    label: a.label,
+    email: check?.email ?? email,
+    loggedIn,
+    permanent: hasKey,
+    hold: !!a.hold,
+    holdReason: a.holdReason ?? null,
+    checkedAt: check?.at ?? null,
+    plan: check?.plan ?? null,
+  };
+}
+
+const PRIVATE_BROWSER = process.env.STUDIO_BROWSER ?? path.join(HERE, 'tools', 'private-browser.exe');
+function startSession(p, { name = 'Session', effort = 'high', model = '', prompt = '', resume = null, fork = false, main = false, sid = null, account = null, login = false, keyTab = false } = {}) {
+  const old = sid && sessions.get(sid);
+  const uuid = resume && !fork ? resume : crypto.randomUUID();
+  const args = [];
+  if (keyTab) args.push('setup-token');
+  else {
+  if (resume) args.push('--resume', resume);
+  if (fork) args.push('--fork-session');
+  if (!resume || fork) args.push('--session-id', uuid);
+  args.push('--name', name);
+  if (EFFORTS.includes(effort)) args.push('--effort', effort);
+  if (model && MODELS.includes(model)) args.push('--model', model);
+  // With "=": these options take several values and would swallow the prompt after them.
+  args.push(`--mcp-config=${MCP_PHONE}`, '--allowedTools=mcp__phone');
+  if (prompt) args.push(prompt);
+  }
+  const s = old ?? { sid: sid ?? crypto.randomBytes(5).toString('hex'), project: p.id, clients: new Set(), buffer: '', ask: null };
+  const acct = accountById(account ?? s.account) ?? currentAccount();
+  Object.assign(s, { uuid, name, effort, model, main: main || s.main, startedAt: Date.now(), buffer: '', ask: null, account: acct.id, live: true, trustAnswered: false });
+  const size = keyTab ? { cols: 400, rows: 34 } : s.size ?? { cols: 120, rows: 34 };
+  const env = cleanEnv(acct);
+  // Sign-in pages open in the normal browser, where the user is already signed in to claude.ai
+  // (STUDIO_BROWSER only for tests).
+  if ((login || keyTab) && process.env.STUDIO_BROWSER) env.BROWSER = PRIVATE_BROWSER;
+  // A key tab makes a new key: it must not run on the old one.
+  if (keyTab) delete env.CLAUDE_CODE_OAUTH_TOKEN;
+  s.pty = pty.spawn(CLAUDE, args, { name: 'xterm-256color', cols: size.cols, rows: size.rows, cwd: p.path, env });
+  // A copy of the screen, kept at the terminal's real size: a browser that opens the terminal gets
+  // this clean picture instead of raw output that was drawn for another width (that garbled it).
+  s.screen?.dispose();
+  s.screen = new ScreenCopy({ cols: size.cols, rows: size.rows, scrollback: 2000, allowProposedApi: true });
+  s.serializer = new SerializeAddon();
+  s.screen.loadAddon(s.serializer);
+  s.pty.onData((d) => {
+    s.screen.write(d, () => scheduleAsk(s));
+    s.buffer = (s.buffer + d).slice(-300000);
+    // A folder Claude has not seen yet asks "Do you trust this folder?" with "No, exit" first: the
+    // projects opened in Studio are the user's own, so it is answered "Yes" once.
+    if (!s.trustAnswered && /Yes,\s*I\s*trust\s*this\s*folder/.test(s.buffer.slice(-4000).replace(ANSI, ' '))) {
+      s.trustAnswered = true;
+      setTimeout(() => s.pty === mine && (mine.write('\x1b[B'), setTimeout(() => s.pty === mine && mine.write('\r'), 300)), 500);
+    }
+    for (const ws of s.clients) ws.send(JSON.stringify({ t: 'o', d }));
+  });
+  const mine = s.pty;
+  mine.onExit(() => {
+    if (s.pty !== mine) return; // replaced by a restart
+    s.pty = null;
+    // Claude quit by itself right after a move to another account: that account does not work.
+    if (s.switchedAt && Date.now() - s.switchedAt < 3 * 60000) s.diedAfterSwitch = true;
+    s.live = false;
+    saveSessions(p);
+    for (const ws of s.clients) ws.send(JSON.stringify({ t: 'o', d: '\r\n[Claude closed. Use "Resume" to continue this conversation.]\r\n' }));
+  });
+  sessions.set(s.sid, s);
+  saveSessions(p);
+  return s;
+}
+
+function stopSession(s) {
+  try {
+    s.pty?.kill();
+  } catch {}
+  s.pty = null;
+  s.live = false;
+  const p = project(s.project);
+  if (p) saveSessions(p);
+}
+
+/** A conversation file written in the last 90 s that no Studio tab is running: it is open elsewhere. */
+const elsewhere = (p, uuid) => {
+  if ([...sessions.values()].some((s) => s.uuid === uuid && s.pty)) return false;
+  try {
+    return Date.now() - fs.statSync(transcriptFile(p, uuid)).mtimeMs < 90000;
+  } catch {
+    return false;
+  }
+};
+
+const view = (s) => {
+  const p = project(s.project);
+  return { sid: s.sid, uuid: s.uuid, name: s.name, effort: s.effort, model: s.model, main: !!s.main, legacy: s.legacy ?? null, running: !!s.pty, ask: s.ask, elsewhere: p ? elsewhere(p, s.uuid) : false, account: s.account ?? 'main', switchNote: s.switchedAt && Date.now() - s.switchedAt < 3600000 ? s.switchNote : null };
+};
+
+app.get('/api/p/:id/sessions', (req, res) => {
+  const p = need(req, res);
+  if (p) res.json([...sessions.values()].filter((s) => s.project === p.id).map(view));
+});
+
+/** Earlier conversations in this project folder, newest first, to resume or fork. */
+app.get('/api/p/:id/history', (req, res) => {
+  const p = need(req, res);
+  if (!p) return;
+  let files = [];
+  try {
+    files = fs
+      .readdirSync(claudeDir(p))
+      .filter((f) => f.endsWith('.jsonl'))
+      .map((f) => ({ uuid: f.slice(0, -6), mtime: fs.statSync(path.join(claudeDir(p), f)).mtimeMs, size: fs.statSync(path.join(claudeDir(p), f)).size }))
+      .sort((a, b) => b.mtime - a.mtime)
+      .slice(0, 30);
+  } catch {}
+  res.json(files.map((f) => ({ ...f, title: sessionTitle(transcriptFile(p, f.uuid)) ?? f.uuid.slice(0, 8), busyElsewhere: elsewhere(p, f.uuid) })));
+});
+
+app.post('/api/p/:id/sessions', (req, res) => {
+  const p = need(req, res);
+  if (!p) return;
+  const { name, effort, model, resume, fork, prompt, attach } = req.body ?? {};
+  // "attach": follow a conversation that runs in another window (read only) without starting Claude.
+  if (attach) {
+    const s = { sid: crypto.randomBytes(5).toString('hex'), project: p.id, uuid: attach, name: name || 'Watching', effort: effort ?? 'high', model: model ?? '', pty: null, buffer: '', clients: new Set(), ask: null };
+    sessions.set(s.sid, s);
+    saveSessions(p);
+    return res.json(view(s));
+  }
+  if (resume && !fork && elsewhere(p, resume)) return res.status(409).json({ error: 'This conversation is running in another window. Watch it, or fork it to talk in a copy.' });
+  res.json(view(startSession(p, { name: name || `Session ${[...sessions.values()].filter((s) => s.project === p.id).length + 1}`, effort, model, resume, fork, prompt })));
+});
+
+const sess = (req, res) => {
+  const s = sessions.get(req.params.sid);
+  if (!s) res.status(404).json({ error: 'no such session' });
+  return s;
+};
+
+/** Effort or model changed, or "Resume": restart Claude on the same conversation with the new settings. */
+app.post('/api/s/:sid/restart', (req, res) => {
+  const s = sess(req, res);
+  if (!s) return;
+  const p = project(s.project);
+  if (elsewhere(p, s.uuid)) return res.status(409).json({ error: 'This conversation is running in another window.' });
+  stopSession(s);
+  const { effort = s.effort, model = s.model, account = s.account } = req.body ?? {};
+  const hasFile = fs.existsSync(transcriptFile(p, s.uuid));
+  res.json(view(startSession(p, { sid: s.sid, name: s.name, effort, model, resume: hasFile ? s.uuid : null, main: s.main, account })));
+});
+
+// ---------- more accounts, and keeping every account connected ----------
+const SHARED = ['projects', 'skills', 'skills-disabled', 'plugins', 'agents', 'commands'];
+const accountsRoot = path.join(os.homedir(), '.claude-accounts');
+/** A new account folder: its own login, everything else linked to the main folder (shared history and skills). */
+function makeAccountDir(dir) {
+  const main = path.join(os.homedir(), '.claude');
+  fs.mkdirSync(dir, { recursive: true });
+  for (const d of SHARED) {
+    const target = path.join(main, d);
+    const link = path.join(dir, d);
+    if (fs.existsSync(target) && !fs.existsSync(link)) fs.symlinkSync(target, link, 'junction');
+  }
+  if (fs.existsSync(path.join(main, 'settings.json')) && !fs.existsSync(path.join(dir, 'settings.json'))) fs.copyFileSync(path.join(main, 'settings.json'), path.join(dir, 'settings.json'));
+  const details = readJson(path.join(os.homedir(), '.claude.json'), {});
+  delete details.oauthAccount;
+  delete details.userID;
+  if (!fs.existsSync(path.join(dir, '.claude.json'))) writeJson(path.join(dir, '.claude.json'), details);
+}
+
+/**
+ * Logins stay alive while they are used; an account left unused for weeks can expire. Every 12 hours
+ * each account is checked with "claude auth status" (which also refreshes it), and Studio shows any
+ * account that needs to log in again.
+ */
+const authChecks = new Map();
+const keyOf = (a) => {
+  try {
+    return fs.readFileSync(path.join(a.dir ?? path.join(os.homedir(), '.claude'), 'token.txt'), 'utf8').trim() || null;
+  } catch {
+    return null;
+  }
+};
+/** Is this account really usable? Asks Anthropic whose login it is, like Claude Code does. */
+const checking = new Map();
+function checkAccount(a) {
+  if (!checking.has(a.id)) checking.set(a.id, checkNow(a).finally(() => checking.delete(a.id)));
+  return checking.get(a.id);
+}
+async function checkNow(a) {
+  const o = readJson(path.join(a.dir ?? path.join(os.homedir(), '.claude'), '.credentials.json'), {})?.claudeAiOauth ?? {};
+  const key = keyOf(a);
+  const token = key ?? o.accessToken;
+  let result = { loggedIn: false, email: null, plan: o.subscriptionType ?? null, permanent: !!key, at: Date.now() };
+  if (token) {
+    try {
+      const r = await fetch('https://api.anthropic.com/api/oauth/profile', { headers: { Authorization: `Bearer ${token}`, 'anthropic-beta': 'oauth-2025-04-20' }, signal: AbortSignal.timeout(20000) });
+      const j = await r.json().catch(() => ({}));
+      if (r.ok) result = { ...result, loggedIn: true, email: j.account?.email_address ?? j.account?.email ?? null };
+      // A permanent key may only run Claude, not read the profile: refused (403) still means it is valid.
+      else if (r.status === 403 && key) result = { ...result, loggedIn: true, email: readJson(path.join(a.dir ?? path.join(os.homedir(), '.claude'), '.claude.json'), {})?.oauthAccount?.emailAddress ?? null };
+      // An expired saved login (not a key) is renewed by Claude itself the next time it starts.
+      else if (r.status === 401 && !key && o.refreshToken) result = { ...result, loggedIn: true, note: 'renews on next start' };
+      else if (r.status >= 500) result = { ...(authChecks.get(a.id) ?? result), at: Date.now() };
+    } catch {
+      result = { ...(authChecks.get(a.id) ?? result), at: Date.now() };
+    }
+  }
+  authChecks.set(a.id, result);
+  return result;
+}
+const checkAll = async () => {
+  for (const a of accounts().list) {
+    if (!a.hold) await checkAccount(a);
+  }
+};
+if (MAIN_INSTANCE) {
+  setTimeout(checkAll, 15000);
+  setInterval(checkAll, 2 * 3600000);
+}
+
+app.post('/api/accounts', (req, res) => {
+  const label = String(req.body?.label ?? '').trim() || `Account ${accounts().list.length + 1}`;
+  const a = accounts();
+  let id = slugify(label);
+  for (let n = 2; a.list.some((x) => x.id === id) || fs.existsSync(path.join(accountsRoot, id)); n++) id = `${slugify(label)}-${n}`;
+  const dir = path.join(accountsRoot, id).replace(/\\/g, '/');
+  makeAccountDir(dir);
+  writeJson(ACCOUNTS, { ...a, list: [...a.list, { id, label, dir }] });
+  res.json({ id, label, dir });
+});
+
+app.patch('/api/accounts/:aid', (req, res) => {
+  const a = accounts();
+  const target = a.list.find((x) => x.id === req.params.aid);
+  if (!target) return res.status(404).json({ error: 'No such account.' });
+  const updates = {};
+  if (req.body?.label !== undefined) {
+    const l = String(req.body.label).trim();
+    if (l) updates.label = l;
+  }
+  if (req.body?.savedEmail !== undefined) {
+    updates.savedEmail = String(req.body.savedEmail).trim() || null;
+  }
+  if (req.body?.savedPassword !== undefined) {
+    updates.savedPassword = String(req.body.savedPassword) || null;
+  }
+  if (req.body?.token !== undefined) {
+    const dir = target.dir ?? path.join(os.homedir(), '.claude');
+    const tokenFile = path.join(dir, 'token.txt');
+    const tokenVal = String(req.body.token).trim();
+    if (tokenVal) {
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(tokenFile, tokenVal, 'utf8');
+    } else {
+      try { if (fs.existsSync(tokenFile)) fs.unlinkSync(tokenFile); } catch {}
+    }
+    authChecks.delete(target.id);
+  }
+  writeJson(ACCOUNTS, { ...a, list: a.list.map((x) => (x.id === req.params.aid ? { ...x, ...updates } : x)) });
+  res.json({ ok: true, account: accountInfo(accountById(req.params.aid)) });
+});
+
+/** Removes an account from Studio only; its folder (and saved login) stays, so it can be added back. */
+app.delete('/api/accounts/:aid', (req, res) => {
+  const a = accounts();
+  const list = a.list.filter((x) => x.id !== req.params.aid);
+  if (!list.length) return res.status(400).json({ error: 'Keep at least one account.' });
+  // Its tabs move to another account when they are next started.
+  for (const s of sessions.values()) if (s.account === req.params.aid && !s.pty) s.account = null;
+  writeJson(ACCOUNTS, { ...a, current: a.current === req.params.aid ? (list.find((x) => !x.hold) ?? list[0]).id : a.current, list });
+  res.json({ ok: true });
+});
+
+/** Opens the dedicated, persistent browser profile for this account so the user can log in or use claude.ai. */
+app.post('/api/accounts/:aid/browser', (req, res) => {
+  const a = accountById(req.params.aid);
+  if (!a) return res.status(404).json({ error: 'No such account.' });
+  const url = req.body?.url || 'https://claude.ai';
+  const profileDir = accountBrowserDir(a.id);
+  try {
+    const info = openBrowserProfile(profileDir, url);
+    res.json({ ok: true, profile: info.profileDir, exe: info.exe });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/** Logs out an account by removing credentials and putting it on hold. */
+app.post('/api/accounts/:aid/logout', (req, res) => {
+  const a = accountById(req.params.aid);
+  if (!a) return res.status(404).json({ error: 'No such account.' });
+  const dir = a.dir ?? path.join(os.homedir(), '.claude');
+  const file = path.join(dir, '.credentials.json');
+  try {
+    if (fs.existsSync(file)) fs.unlinkSync(file);
+  } catch {}
+  authChecks.delete(a.id);
+  holdAccount(a.id, true, 'logged out');
+  res.json({ ok: true });
+});
+
+/** Manually restore credentials from backup. */
+app.post('/api/accounts/:aid/restore', async (req, res) => {
+  const a = accountById(req.params.aid);
+  if (!a) return res.status(404).json({ error: 'No such account.' });
+  const backup = backupInfo(a);
+  if (!backup) return res.status(404).json({ error: 'No credential backup found for this account. Log in first to create one.' });
+  const restored = restoreCredentials(a);
+  if (!restored) return res.status(400).json({ error: 'Credentials are already valid, or the backup has no refresh token.' });
+  // Take it off hold if it was paused due to logout
+  if (a.hold) holdAccount(a.id, false);
+  authChecks.delete(a.id);
+  // Verify the restored credentials actually work
+  const check = await checkAccount(a);
+  res.json({ ok: true, loggedIn: check.loggedIn, email: check.email, backup });
+});
+
+/** Force a fresh backup of the current credentials. */
+app.post('/api/accounts/:aid/backup', (req, res) => {
+  const a = accountById(req.params.aid);
+  if (!a) return res.status(404).json({ error: 'No such account.' });
+  const saved = savedLogin(a);
+  if (!saved.valid) return res.status(400).json({ error: 'Account is not logged in. Nothing to back up.' });
+  backupCredentials(a);
+  res.json({ ok: true, backup: backupInfo(a) });
+});
+
+const lastLogin = { at: 0 };
+app.post('/api/accounts/:aid/login', (req, res) => {
+  const a = accountById(req.params.aid);
+  const p = project(req.body?.project);
+  if (!a || !p) return res.status(400).json({ error: 'No such account or project.' });
+  // Logging in again means it is wanted: off hold.
+  if (a.hold) holdAccount(a.id, false);
+  for (const old of [...sessions.values()]) if (old.loginFor === a.id) (stopSession(old), sessions.delete(old.sid));
+  const s = startSession(p, { name: `Log in: ${a.label}`, effort: 'low', account: a.id, login: true });
+  setTimeout(() => s.pty && (s.pty.write('/login'), setTimeout(() => s.pty?.write('\r'), 1200), setTimeout(() => s.pty?.write('\r'), 4500)), 9000);
+  Object.assign(s, { loginFor: a.id, returnSid: req.body?.returnSid ?? null, loginStart: savedLogin(a).at });
+  saveSessions(p);
+  res.json(view(s));
+});
+app.get('/api/accounts/last-login', (_req, res) => res.json(lastLogin));
+app.post('/api/accounts/:aid/permanent', (req, res) => {
+  const a = accountById(req.params.aid);
+  const p = project(req.body?.project);
+  if (!a || !p) return res.status(400).json({ error: 'No such account or project.' });
+  for (const old of [...sessions.values()]) if (old.keyFor === a.id) (stopSession(old), sessions.delete(old.sid));
+  const s = startSession(p, { name: `Permanent login: ${a.label}`, effort: 'low', account: a.id, keyTab: true });
+  s.keyFor = a.id;
+  const mine = s.pty;
+  mine.onData(() => {
+    if (!s.keyFor) return;
+    const text = s.buffer.slice(-20000).replace(ANSI, '');
+    if (!/token created successfully/i.test(text)) return;
+    const key = (text.match(/sk-ant-oat01-[A-Za-z0-9_-]{20,}/g) ?? []).pop();
+    if (!key) return;
+    s.keyFor = null;
+    const dir = a.dir ?? path.join(os.homedir(), '.claude');
+    fs.writeFileSync(path.join(dir, 'token.txt'), key);
+    authChecks.delete(a.id);
+    checkAccount(a).then((c) => {
+      Object.assign(lastLogin, { at: Date.now(), account: a.id, label: a.label, email: c.email, permanent: true, sameAs: null, moved: null });
+      fs.appendFileSync(SWITCH_LOG, `${new Date().toISOString()} ${a.label}: permanent key saved (${c.loggedIn ? `works, ${c.email}` : 'did not work'})\n`);
+    });
+    setTimeout(() => (stopSession(s), sessions.delete(s.sid), saveSessions(p)), 4000);
+  });
+  saveSessions(p);
+  res.json(view(s));
+});
+async function watchLogins() {
+  for (const s of [...sessions.values()]) {
+    if (!s.loginFor) continue;
+    const a = accountById(s.loginFor);
+    if (!a) continue;
+    const saved = savedLogin(a);
+    if (!saved.valid || saved.at <= (s.loginStart ?? 0)) continue;
+    s.loginFor = null; // once
+    const check = await checkAccount(a);
+    if (!check.loggedIn) {
+      s.loginFor = a.id;
+      continue;
+    }
+    const same = accounts().list.find((x) => x.id !== a.id && accountInfo(x).email && accountInfo(x).email === check.email);
+    // The browser was signed in to an account Studio already has: nothing changes, the user is told.
+    if (!same) writeJson(ACCOUNTS, { ...accounts(), current: a.id });
+    let moved = null;
+    const back = sessions.get(s.returnSid);
+    if (!same && back?.pty && back.account !== a.id && !transcriptFor(transcriptFile(project(back.project), back.uuid)).busy) {
+      switchTab(back, a, 'you logged in to it', false);
+      moved = back.name;
+    }
+    stopSession(s);
+    sessions.delete(s.sid);
+    const p = project(s.project);
+    if (p) saveSessions(p);
+    Object.assign(lastLogin, { at: Date.now(), account: a.id, label: a.label, email: check.email, sameAs: same?.label ?? null, moved });
+    fs.appendFileSync(SWITCH_LOG, `${new Date().toISOString()} ${a.label} logged in as ${check.email}${same ? ` (the same login as ${same.label})` : ''}${moved ? `; "${moved}" moved to it` : ''}\n`);
+    // Auto-backup credentials after a successful login
+    backupCredentials(a);
+  }
+}
+setInterval(watchLogins, 4000);
+
+app.post('/api/accounts/check', async (_req, res) => {
+  await checkAll();
+  const a = accounts();
+  res.json({ current: a.current, list: a.list.map(accountInfo) });
+});
+
+// ---------- automatic account switching ----------
+// When the account a tab uses reaches the threshold (90% of its session or weekly limit), or Claude
+// says "You've hit your ... limit", the tab moves to the account with the most room left and goes on
+// with the same conversation. Works for any number of accounts. If every account is at the
+// threshold, the one whose limit resets first is used. Settings in data/accounts.json:
+// "autoSwitch" (default on) and "threshold" (default 90).
+const SWITCH_LOG = path.join(DATA, 'switch.log');
+const usageCache = new Map(); // account id -> { at, limits: [{ label, pct, resets }] }
+
+async function fetchUsage(id, refresh = false) {
+  try {
+    const r = await fetch(`${HELPER}/usage?account=${encodeURIComponent(id)}${refresh ? '&refresh=1' : ''}`, { signal: AbortSignal.timeout(10000) });
+    const u = await r.json();
+    if (u.limits?.length) usageCache.set(id, { at: u.at, limits: u.limits });
+  } catch {}
+  return usageCache.get(id) ?? null;
+}
+const worst = (u) => (u?.limits?.length ? Math.max(...u.limits.map((l) => l.pct)) : null);
+
+/** "3:30pm (Africa/Lagos)" or "Oct 26, 6am (Africa/Lagos)" -> the next time it happens (this PC's clock). */
+function resetTime(text) {
+  const m = /^(?:([A-Z][a-z]{2}) (\d{1,2}), )?(\d{1,2})(?::(\d{2}))?\s*(am|pm)/i.exec(String(text ?? '').trim());
+  if (!m) return Infinity;
+  let h = +m[3] % 12;
+  if (m[5].toLowerCase() === 'pm') h += 12;
+  const now = new Date();
+  const d = new Date(now);
+  if (m[1]) d.setMonth(['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'].indexOf(m[1]), +m[2]);
+  d.setHours(h, +(m[4] ?? 0), 0, 0);
+  if (!m[1] && d < now) d.setDate(d.getDate() + 1);
+  if (m[1] && d < now) d.setFullYear(d.getFullYear() + 1);
+  return d.getTime();
+}
+/** When an account can be used again: the latest reset among its limits at or over the threshold. */
+const freeAgainAt = (u, threshold) => Math.max(0, ...(u?.limits ?? []).filter((l) => l.pct >= threshold).map((l) => resetTime(l.resets)));
+
+/** The best account to move to: the most room left, else the one whose limits reset first. */
+function bestAccount(exceptId) {
+  const { threshold = 90 } = accounts();
+  const usable = accounts()
+    .list.filter((a) => a.id !== exceptId && !a.hold && accountInfo(a).loggedIn)
+    .map((a) => ({ a, u: usageCache.get(a.id) }))
+    .filter((x) => x.u);
+  const withRoom = usable.filter((x) => worst(x.u) < threshold).sort((x, y) => worst(x.u) - worst(y.u));
+  if (withRoom.length) return { account: withRoom[0].a, why: `${worst(withRoom[0].u)}% used` };
+  const soonest = usable.sort((x, y) => freeAgainAt(x.u, threshold) - freeAgainAt(y.u, threshold))[0];
+  return soonest ? { account: soonest.a, why: 'all accounts are near their limits; this one resets first', allFull: true, freeAt: freeAgainAt(soonest.u, threshold) } : null;
+}
+
+/** Puts an account on hold (or back in use): a held account is never picked, and tabs on it move away. */
+function holdAccount(id, hold, reason = null) {
+  const a = accounts();
+  const list = a.list.map((x) => (x.id === id ? { ...x, hold: !!hold, holdReason: hold ? reason : null, heldAt: hold ? Date.now() : null } : x));
+  writeJson(ACCOUNTS, { ...a, list });
+  if (hold && a.current === id) writeJson(ACCOUNTS, { ...accounts(), current: bestAccount(id)?.account.id ?? a.current });
+  if (hold) fs.appendFileSync(SWITCH_LOG, `${new Date().toISOString()} ${accountById(id)?.label ?? id} put on hold${reason ? ` (${reason})` : ''}\n`);
+}
+
+function switchTab(s, target, why, resumeWork) {
+  const p = project(s.project);
+  if (!p) return;
+  const from = accountById(s.account)?.label ?? s.account;
+  stopSession(s);
+  const hasFile = fs.existsSync(transcriptFile(p, s.uuid));
+  startSession(p, { sid: s.sid, name: s.name, effort: s.effort, model: s.model, resume: hasFile ? s.uuid : null, main: s.main, account: target.id });
+  s.switchedAt = Date.now();
+  s.switchNote = `Moved from ${from} to ${target.label} (${why}).`;
+  fs.appendFileSync(SWITCH_LOG, `${new Date().toISOString()} ${p.id}/${s.name}: ${from} -> ${target.label} (${why})${resumeWork ? ', told Claude to continue' : ''}\n`);
+  // Claude had stopped at the limit mid-task: once it is up on the new account, it carries on.
+  if (resumeWork) setTimeout(() => s.pty && type(s, 'Continue the task you were working on. You were moved to another Claude account because the usage limit of the previous one was reached; nothing was lost.'), 15000);
+}
+
+/** A tab stopped at its limit with nowhere better to go: Claude's own /rate-limit-options menu has
+ *  "Wait here, then continue automatically at <reset>", which is picked so the tab carries on by
+ *  itself at the reset instead of sitting there. */
+function waitForReset(s) {
+  if (!s.pty) return;
+  const mine = s.pty;
+  let seen = '';
+  const sub = mine.onData((d) => (seen += d));
+  const done = (note) => {
+    sub.dispose();
+    fs.appendFileSync(SWITCH_LOG, `${new Date().toISOString()} ${s.project}/${s.name}: ${note}\n`);
+  };
+  mine.write('/rate-limit-options');
+  setTimeout(() => s.pty === mine && mine.write('\r'), 1200);
+  setTimeout(() => {
+    if (s.pty !== mine) return done('wait-for-reset skipped (tab restarted)');
+    const text = seen.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, ' ').replace(/\s+/g, ' ');
+    const m = /(\d)\.\s*Wait here, then continue automatically([^\d]*?)(?=\d\.|Enter to confirm|$)/i.exec(text);
+    if (!m) {
+      mine.write('\x1b');
+      return done('wait-for-reset: the menu had no "continue automatically" option');
+    }
+    // The menu starts on option 1: move down to the right one, then confirm.
+    for (let i = 1; i < +m[1]; i++) mine.write('\x1b[B');
+    setTimeout(() => s.pty === mine && mine.write('\r'), 400);
+    s.switchNote = `All accounts are at their limit: waiting here, then continuing automatically${m[2].trim() ? ` ${m[2].trim()}` : ''}.`;
+    s.switchedAt = Date.now();
+    done(`all accounts full, set to wait and continue automatically${m[2].trim() ? ` ${m[2].trim()}` : ''}`);
+  }, 5000);
+}
+
+async function autoSwitch() {
+  const cfg = accounts();
+  if (cfg.autoSwitch === false) {
+    // Switching is off, but a tab stuck at its limit still waits for the reset and goes on by itself.
+    for (const s of sessions.values()) {
+      const p = s.pty && project(s.project);
+      if (!p) continue;
+      const t = transcriptFor(transcriptFile(p, s.uuid));
+      t.update();
+      if (!s.loginFor && t.limitHitAt && Date.now() - t.limitHitAt < 30 * 60000 && s.waitArmedFor !== t.limitHitAt) {
+        s.waitArmedFor = t.limitHitAt;
+        waitForReset(s);
+      }
+    }
+    return;
+  }
+  const threshold = cfg.threshold ?? 90;
+  for (const a of cfg.list) {
+    const u = await fetchUsage(a.id);
+    // Close to the limit: read more often (the helper allows one fresh read a minute).
+    if (worst(u) !== null && worst(u) >= threshold - 10) fetchUsage(a.id, true);
+  }
+  for (const s of sessions.values()) {
+    if (!s.pty && !s.diedAfterSwitch) continue;
+    // A tab where an account is logging in stays on that account, whatever happens.
+    if (s.loginFor) continue;
+    const p = project(s.project);
+    if (!p) continue;
+    const acct = accountById(s.account ?? 'main');
+    const u = usageCache.get(s.account ?? 'main');
+    const t = transcriptFor(transcriptFile(p, s.uuid));
+    t.update();
+    // The account does not work at all (blocked, logged out, no access, or Claude quit right after
+    // the move): no waiting on it. It goes on hold and the tab moves at once, to the account with the
+    // most room, or if all are full to the one that resets first.
+    const errored = !!t.accountErrorAt && t.accountErrorAt >= (s.startedAt ?? 0) - 5000 && Date.now() - t.accountErrorAt < 30 * 60000;
+    if (s.diedAfterSwitch || errored) {
+      const reason = errored ? t.accountError : 'Claude closed right after the move';
+      s.diedAfterSwitch = false;
+      t.accountErrorAt = null;
+      // An account with a permanent key: the tab was still on the old login. It restarts on the
+      // key instead, and the account is not put on hold.
+      if (acct && keyOf(acct) && (await checkAccount(acct)).loggedIn) {
+        switchTab(s, acct, 'restarted on its permanent login', true);
+        continue;
+      }
+      if (acct) holdAccount(acct.id, true, reason);
+      const pick = bestAccount(s.account);
+      if (pick) switchTab(s, pick.account, `${acct?.label ?? s.account} does not work (${reason}), put on hold`, true);
+      continue;
+    }
+    if (!s.pty) continue;
+    const held = !!acct?.hold;
+    // A real limit message from Claude Code in the last 30 minutes, after the tab's last move.
+    const hit = !!t.limitHitAt && Date.now() - t.limitHitAt < 30 * 60000 && (!s.switchedAt || t.limitHitAt > s.switchedAt);
+    const over = worst(u) !== null && worst(u) >= threshold;
+    if (!hit && !over && !held) continue;
+    // A tab that was just moved stays put for 10 minutes, unless it really hit a limit.
+    if (!hit && !held && s.switchedAt && Date.now() - s.switchedAt < 10 * 60000) continue;
+    const pick = bestAccount(s.account);
+    // Stopped at the limit and no account is free sooner: wait for the reset in place, once per hit.
+    const stuck = hit && !held && (!pick || pick.account.id === s.account || (pick.allFull && pick.freeAt >= freeAgainAt(u, threshold)));
+    if (stuck) {
+      if (s.waitArmedFor !== t.limitHitAt) {
+        s.waitArmedFor = t.limitHitAt;
+        waitForReset(s);
+      }
+      continue;
+    }
+    if (!pick || pick.account.id === s.account) continue;
+    // All accounts full: move only when Claude is stuck, and only to one that will be free sooner.
+    if (pick.allFull && !held && (!hit || pick.freeAt >= freeAgainAt(u, threshold))) continue;
+    // Never cut a step in progress at 90%: wait until the tab is idle (a hit limit means it has stopped).
+    const busy = t.busy;
+    if (busy && !hit) continue;
+    switchTab(s, pick.account, held ? `${acct.label} is on hold` : hit ? 'it hit its usage limit' : `${worst(u)}% used; new account ${pick.why}`, !!hit);
+  }
+  // New tabs start on the account with the most room.
+  const cur = usageCache.get(cfg.current);
+  const curAcct = accountById(cfg.current);
+  const curHeld = !curAcct || !!curAcct.hold || !accountInfo(curAcct).loggedIn;
+  if (curHeld || (worst(cur) !== null && worst(cur) >= threshold)) {
+    const pick = bestAccount(cfg.current);
+    if (pick && (curHeld || !pick.allFull)) writeJson(ACCOUNTS, { ...accounts(), current: pick.account.id });
+  }
+}
+if (MAIN_INSTANCE) {
+  setTimeout(autoSwitch, 30000);
+  setInterval(autoSwitch, 60000);
+}
+
+app.post('/api/accounts/settings', (req, res) => {
+  const a = accounts();
+  const threshold = Math.max(50, Math.min(99, +req.body?.threshold || a.threshold || 90));
+  const autoSwitch = typeof req.body?.autoSwitch === 'boolean' ? req.body.autoSwitch : a.autoSwitch !== false;
+  writeJson(ACCOUNTS, { ...a, autoSwitch, threshold });
+  res.json({ ok: true, autoSwitch, threshold });
+});
+app.post('/api/accounts/:aid/hold', (req, res) => {
+  if (!accountById(req.params.aid)) return res.status(400).json({ error: 'No such account.' });
+  const hold = req.body?.hold !== false;
+  holdAccount(req.params.aid, hold, hold ? 'put on hold by you' : null);
+  res.json({ ok: true, current: accounts().current });
+});
+/** Where a tab on this account would be moved now (for the Accounts window and for checks). */
+app.get('/api/accounts/best', (req, res) => {
+  const pick = bestAccount(req.query.except);
+  res.json(pick ? { id: pick.account.id, label: pick.account.label, why: pick.why, allFull: !!pick.allFull } : null);
+});
+app.get('/api/accounts/switches', (_req, res) => {
+  let lines = [];
+  try {
+    lines = fs.readFileSync(SWITCH_LOG, 'utf8').trim().split('\n').slice(-15).reverse();
+  } catch {}
+  res.json(lines);
+});
+
+app.get('/api/accounts', async (_req, res) => {
+  const a = accounts();
+  // Limits for the Accounts window, only for active accounts
+  await Promise.all(a.list.filter((x) => !x.hold).map((x) => (usageCache.has(x.id) ? null : fetchUsage(x.id))));
+  res.json({ current: a.current, autoSwitch: a.autoSwitch !== false, threshold: a.threshold ?? 90, list: a.list.map((x) => ({ ...accountInfo(x), used: worst(usageCache.get(x.id)), hold: !!x.hold, holdReason: x.holdReason ?? null, limits: usageCache.get(x.id)?.limits ?? [], limitsAt: usageCache.get(x.id)?.at ?? null })) });
+});
+
+/** Picks the account new sessions use. */
+app.post('/api/accounts/current', (req, res) => {
+  const a = accounts();
+  if (!accountById(req.body?.id)) return res.status(400).json({ error: 'No such account.' });
+  writeJson(ACCOUNTS, { ...a, current: req.body.id });
+  res.json({ ok: true });
+});
+
+app.post('/api/s/:sid/stop', (req, res) => {
+  const s = sess(req, res);
+  if (!s) return;
+  stopSession(s);
+  res.json(view(s));
+});
+
+app.delete('/api/s/:sid', (req, res) => {
+  const s = sess(req, res);
+  if (!s) return;
+  stopSession(s);
+  sessions.delete(s.sid);
+  saveSessions(project(s.project));
+  res.json({ ok: true });
+});
+
+/** Types a message into Claude (pasted as one block, then Enter). */
+function type(s, text) {
+  const body = String(text).replace(/\r\n/g, '\n');
+  s.pty.write(body.includes('\n') ? `\x1b[200~${body}\x1b[201~` : body);
+  setTimeout(() => s.pty?.write('\r'), 120);
+}
+
+app.post('/api/s/:sid/input', (req, res) => {
+  const s = sess(req, res);
+  if (!s) return;
+  if (!s.pty) return res.status(409).json({ error: 'Claude is not running in this tab. Press Resume first.' });
+  type(s, req.body?.text ?? '');
+  res.json({ ok: true });
+});
+
+const KEYS = { enter: '\r', esc: '\x1b', up: '\x1b[A', down: '\x1b[B', tab: '\t', 'ctrl-c': '\x03', 'shift-tab': '\x1b[Z' };
+app.post('/api/s/:sid/key', (req, res) => {
+  const s = sess(req, res);
+  if (!s?.pty) return res.status(409).json({ error: 'not running' });
+  const k = String(req.body?.key ?? '');
+  const withEnter = !!req.body?.enter;
+  let ch = KEYS[k] ?? (/^[0-9a-z]$/i.test(k) ? k : '');
+  if (ch && withEnter && !ch.endsWith('\r')) ch += '\r';
+  s.pty.write(ch);
+  res.json({ ok: true });
+});
+
+/** Picks an option of the open prompt: arrows from the selected option to it, then Enter. With
+ * text (for "Type something."), the text is typed into that option before the Enter. */
+app.post('/api/s/:sid/choose', async (req, res) => {
+  const s = sess(req, res);
+  if (!s?.pty) return res.status(409).json({ error: 'Claude is not running in this tab.' });
+  const ask = detectAsk(s);
+  const target = ask ? ask.options.findIndex((o) => o.key === String(req.body?.key)) : -1;
+  if (target < 0) return res.status(409).json({ error: 'That question is no longer open.' });
+  const from = Math.max(0, ask.options.findIndex((o) => o.selected));
+  const pty = s.pty;
+  const step = target > from ? '\x1b[B' : '\x1b[A';
+  for (let i = 0; i < Math.abs(target - from); i++) {
+    if (s.pty !== pty) return res.status(409).json({ error: 'Claude restarted.' });
+    pty.write(step);
+    await new Promise((r) => setTimeout(r, 70));
+  }
+  await new Promise((r) => setTimeout(r, 120));
+  const text = String(req.body?.text ?? '').replace(/[\r\n]+/g, ' ').trim();
+  if (text && s.pty === pty) (pty.write(text), await new Promise((r) => setTimeout(r, 250)));
+  if (s.pty === pty) pty.write('\r');
+  s.ask = null;
+  res.json({ ok: true });
+});
+
+const transcripts = new Map();
+const transcriptFor = (file, opts) => {
+  if (!transcripts.has(file)) transcripts.set(file, new Transcript(file, opts));
+  return transcripts.get(file);
+};
+app.get('/api/s/:sid/chat', (req, res) => {
+  const s = sess(req, res);
+  if (!s) return;
+  const p = project(s.project);
+  res.json({ ...transcriptFor(transcriptFile(p, s.uuid)).state(req.query.rev), session: view(s) });
+});
+
+// ---------- helper agents ----------
+app.get('/api/p/:id/agents', (req, res) => {
+  const p = need(req, res);
+  if (!p) return;
+  const dir = agentsDir(p);
+  const order = readJson(path.join(dir, 'list.json'), []);
+  let cards = [];
+  try {
+    cards = fs
+      .readdirSync(dir)
+      .filter((f) => f.endsWith('.json') && f !== 'list.json')
+      .map((f) => ({ key: f.slice(0, -5), ...readJson(path.join(dir, f), {}) }));
+  } catch {}
+  cards.sort((a, b) => (order.indexOf(a.key) + 1 || 999) - (order.indexOf(b.key) + 1 || 999));
+  // Helpers found in the conversation folders, even without a card.
+  const found = [];
+  try {
+    for (const conv of fs.readdirSync(claudeDir(p))) {
+      const sub = path.join(claudeDir(p), conv, 'subagents');
+      if (!fs.existsSync(sub)) continue;
+      for (const f of fs.readdirSync(sub).filter((x) => /^agent-.*\.jsonl$/.test(x))) {
+        const file = path.join(sub, f);
+        const mtime = fs.statSync(file).mtimeMs;
+        if (Date.now() - mtime > 7 * 86400000) continue;
+        found.push({ agentId: f.slice(6, -6), conv, file, mtime });
+      }
+    }
+  } catch {}
+  found.sort((a, b) => b.mtime - a.mtime);
+  const helpers = found.slice(0, 25).map((h) => {
+    const t = transcriptFor(h.file, { sidechain: true });
+    t.update();
+    const card = cards.find((c) => c.agentId === h.agentId);
+    return { agentId: h.agentId, conv: h.conv, mtime: h.mtime, task: t.first?.slice(0, 400) ?? '', working: Date.now() - h.mtime < 120000, card: card?.key ?? null };
+  });
+  res.json({ cards, helpers });
+});
+
+app.get('/api/p/:id/agent/:agentId', (req, res) => {
+  const p = need(req, res);
+  if (!p) return;
+  for (const conv of fs.existsSync(claudeDir(p)) ? fs.readdirSync(claudeDir(p)) : []) {
+    const file = path.join(claudeDir(p), conv, 'subagents', `agent-${req.params.agentId.replace(/[^\w-]/g, '')}.jsonl`);
+    if (fs.existsSync(file)) return res.json(transcriptFor(file, { sidechain: true }).state(req.query.rev));
+  }
+  res.status(404).json({ error: 'not found' });
+});
+
+/** Passes a message to a helper through the Claude session that started it. */
+app.post('/api/p/:id/agent/:agentId/message', async (req, res) => {
+  const p = need(req, res);
+  if (!p) return;
+  const text = `Message for the helper agent ${req.params.agentId}. Please pass it on with SendMessage: ${req.body?.text ?? ''}`;
+  const owner = [...fs.readdirSync(claudeDir(p))].find((conv) => fs.existsSync(path.join(claudeDir(p), conv, 'subagents', `agent-${req.params.agentId}.jsonl`)));
+  const s = [...sessions.values()].find((x) => x.uuid === owner && x.pty);
+  if (s) {
+    type(s, text);
+    return res.json({ ok: true, via: s.name });
+  }
+  // The session may run in an older workspace terminal (PotaLang: port 4545).
+  if (p.legacyTerm) {
+    try {
+      await new Promise((resolve, reject) => {
+        const ws = new WebSocket(p.legacyTerm, { origin: p.legacyTerm.replace(/^ws/, 'http').replace(/\/term$/, '') });
+        ws.on('open', () => {
+          ws.send(JSON.stringify({ t: 'i', d: text }));
+          setTimeout(() => {
+            ws.send(JSON.stringify({ t: 'i', d: '\r' }));
+            setTimeout(() => (ws.close(), resolve()), 200);
+          }, 150);
+        });
+        ws.on('error', reject);
+      });
+      return res.json({ ok: true, via: 'the old workspace terminal' });
+    } catch {}
+  }
+  res.status(409).json({ error: 'The session that started this helper is not open in Studio. Open it (Resume) and try again.' });
+});
+
+// ---------- files ----------
+/** Folders a project's file browser may show: the project, its Studio data, and any extra roots. */
+const roots = (p) => [p.path, dataDir(p), ...(p.extraRoots ?? [])].map((r) => path.resolve(r));
+function inside(p, rootIdx, rel = '') {
+  const root = roots(p)[+rootIdx || 0];
+  if (!root) return null;
+  const full = path.resolve(root, String(rel));
+  return full === root || full.startsWith(root + path.sep) ? full : null;
+}
+const EXT = {
+  image: ['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp', 'ico', 'avif'],
+  audio: ['mp3', 'wav', 'ogg', 'm4a', 'aac', 'flac'],
+  video: ['mp4', 'webm', 'mov', 'mkv'],
+  doc: ['md', 'mdx', 'txt', 'pdf'],
+  data: ['json', 'csv', 'tsv', 'yaml', 'yml', 'toml', 'xml'],
+  code: ['ts', 'tsx', 'js', 'jsx', 'mjs', 'cjs', 'py', 'kt', 'java', 'swift', 'css', 'scss', 'html', 'sh', 'ps1', 'cmd', 'bat', 'vbs', 'gradle', 'rs', 'go', 'c', 'cpp', 'h', 'cs', 'gd', 'lua', 'sql'],
+};
+const kindOf = (name) => {
+  const ext = name.split('.').pop().toLowerCase();
+  return Object.keys(EXT).find((k) => EXT[k].includes(ext)) ?? 'other';
+};
+
+app.get('/api/p/:id/roots', (req, res) => {
+  const p = need(req, res);
+  if (p) res.json(roots(p).map((r, i) => ({ i, path: r.replace(/\\/g, '/'), label: i === 0 ? 'Project' : i === 1 ? 'Studio notes' : path.basename(r) })));
+});
+
+app.get('/api/p/:id/ls', (req, res) => {
+  const p = need(req, res);
+  if (!p) return;
+  const dir = inside(p, req.query.root, req.query.dir);
+  if (!dir || !fs.existsSync(dir)) return res.status(404).json({ error: 'not found' });
+  const items = fs
+    .readdirSync(dir, { withFileTypes: true })
+    .filter((d) => !d.name.startsWith('.') || d.name === '.studio')
+    .filter((d) => !(d.isDirectory() && SKIP_DIRS.has(d.name)))
+    .map((d) => {
+      let st = null;
+      try {
+        st = fs.statSync(path.join(dir, d.name));
+      } catch {}
+      return { name: d.name, dir: d.isDirectory(), size: st?.size ?? 0, mtime: st?.mtimeMs ?? 0, kind: d.isDirectory() ? 'folder' : kindOf(d.name) };
+    })
+    .sort((a, b) => b.dir - a.dir || a.name.localeCompare(b.name));
+  res.json(items.slice(0, 2000));
+});
+
+function walk(dir, out, limit, depth = 0) {
+  if (out.length >= limit || depth > 9) return;
+  let list = [];
+  try {
+    list = fs.readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return;
+  }
+  for (const d of list) {
+    if (out.length >= limit) return;
+    if (d.name.startsWith('.') || (d.isDirectory() && SKIP_DIRS.has(d.name))) continue;
+    const full = path.join(dir, d.name);
+    if (d.isDirectory()) walk(full, out, limit, depth + 1);
+    else out.push(full);
+  }
+}
+
+/** Search by name, or list every file of a kind (images, audio, docs...). */
+app.get('/api/p/:id/find', (req, res) => {
+  const p = need(req, res);
+  if (!p) return;
+  const root = roots(p)[+req.query.root || 0];
+  const all = [];
+  walk(root, all, 40000);
+  const q = String(req.query.q ?? '').toLowerCase();
+  const kind = String(req.query.kind ?? '');
+  const hits = all
+    .filter((f) => (!q || path.basename(f).toLowerCase().includes(q)) && (!kind || kindOf(f) === kind))
+    .slice(0, 400)
+    .map((f) => {
+      const st = fs.statSync(f);
+      return { rel: path.relative(root, f).replace(/\\/g, '/'), name: path.basename(f), size: st.size, mtime: st.mtimeMs, kind: kindOf(f) };
+    });
+  res.json(hits);
+});
+
+app.get('/api/p/:id/raw', (req, res) => {
+  const p = need(req, res);
+  if (!p) return;
+  const file = inside(p, req.query.root, req.query.path);
+  if (!file || !fs.existsSync(file) || fs.statSync(file).isDirectory()) return res.status(404).end();
+  res.set('Cache-Control', 'no-store');
+  res.sendFile(file);
+});
+
+/** Every Markdown file in the project, for the Docs panel. */
+app.get('/api/p/:id/docs', (req, res) => {
+  const p = need(req, res);
+  if (!p) return;
+  const out = [];
+  roots(p).forEach((root, i) => {
+    const all = [];
+    walk(root, all, 20000);
+    for (const f of all.filter((x) => /\.mdx?$/i.test(x)).slice(0, 300)) out.push({ root: i, rel: path.relative(root, f).replace(/\\/g, '/'), name: path.basename(f), mtime: fs.statSync(f).mtimeMs });
+  });
+  res.json(out.sort((a, b) => b.mtime - a.mtime));
+});
+
+/** Files you give Claude in the chat: saved in the project's Studio notes, then their path goes in the message. */
+app.post('/api/p/:id/upload', express.raw({ type: '*/*', limit: '300mb' }), (req, res) => {
+  const p = need(req, res);
+  if (!p) return;
+  const name = String(req.query.name ?? 'file').replace(/[<>:"/\\|?*\x00-\x1f]/g, '_').slice(-120);
+  const stamp = new Date().toISOString().replace(/[:T]/g, '-').slice(0, 19);
+  const file = path.join(dataDir(p), 'uploads', `${stamp}-${name}`);
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, req.body);
+  res.json({ path: file.replace(/\\/g, '/'), name, size: req.body.length });
+});
+
+// ---------- phone and skills (through the helper on port 4548) ----------
+const helper = async (pathname, body) => {
+  const r = await fetch(`${HELPER}${pathname}`, body ? { method: 'POST', headers: { 'Content-Type': 'application/json', Origin: 'http://localhost:4545' }, body: JSON.stringify(body) } : {});
+  return { status: r.status, json: await r.json().catch(() => ({})) };
+};
+for (const [route, target] of [
+  ['/api/skills', '/skills'],
+  ['/api/phone', '/phone'],
+]) {
+  app.get(route, async (_req, res) => {
+    try {
+      const r = await helper(target);
+      res.status(r.status).json(r.json);
+    } catch {
+      res.status(503).json({ error: 'The helper (port 4548) is not running.' });
+    }
+  });
+}
+for (const [route, target] of [
+  ['/api/skills/set', '/skills/set'],
+  ['/api/phone/connect', '/phone/connect'],
+  ['/api/phone/mirror', '/phone/mirror'],
+  ['/api/phone/stop', '/phone/stop'],
+]) {
+  app.post(route, async (req, res) => {
+    try {
+      const r = await helper(target, req.body ?? {});
+      res.status(r.status).json(r.json);
+    } catch {
+      res.status(503).json({ error: 'The helper (port 4548) is not running.' });
+    }
+  });
+}
+/** The page reaches the helper (port 4548) through Studio, so it also works from the phone. */
+app.all(/^\/api\/helper\/(.+)$/, async (req, res) => {
+  try {
+    const q = new URLSearchParams(req.query).toString();
+    const r = await fetch(`${HELPER}/${req.params[0]}${q ? `?${q}` : ''}`, req.method === 'GET' ? { signal: AbortSignal.timeout(30000) } : { method: req.method, headers: { 'Content-Type': 'application/json', Origin: 'http://localhost:4545' }, body: JSON.stringify(req.body ?? {}), signal: AbortSignal.timeout(120000) });
+    res.status(r.status).json(await r.json().catch(() => ({})));
+  } catch {
+    res.status(503).json({ error: 'The helper (port 4548) is not running.' });
+  }
+});
+
+app.get('/api/usage', async (req, res) => {
+  try {
+    const q = new URLSearchParams(req.query).toString();
+    const r = await fetch(`${HELPER}/usage${q ? `?${q}` : ''}`, { signal: AbortSignal.timeout(10000) });
+    res.status(r.status).json(await r.json());
+  } catch {
+    res.status(503).json({ error: 'The helper (port 4548) is not running.' });
+  }
+});
+
+// The emulator or phone in the Phone panel (the same device Claude's phone tools use).
+app.get('/api/phone/state', async (_req, res) => {
+  const list = await Phone.devices();
+  res.json({ devices: list, current: (await Phone.current(list))?.serial ?? null, avds: await Phone.avds(), starting: Phone.emulatorStarting() });
+});
+app.post('/api/phone/use', (req, res) => (Phone.choose(String(req.body?.serial ?? '')), res.json({ ok: true })));
+app.post('/api/phone/emulator', async (req, res) => {
+  try {
+    if (req.body?.action === 'stop') return res.json({ stopped: await Phone.emulatorStop() });
+    const r = await Phone.emulatorStart(req.body?.avd);
+    Phone.choose(r.serial);
+    res.json(r);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+app.get('/api/phone/screen', async (_req, res) => {
+  try {
+    const s = await Phone.screen();
+    res.set('Content-Type', 'image/png').set('Cache-Control', 'no-store').set('X-Scale', String(s.scale)).send(s.png);
+  } catch (err) {
+    res.status(503).json({ error: err.message });
+  }
+});
+/** Taps, swipes, keys and typing from the panel (coordinates in screenshot pixels). */
+app.post('/api/phone/input', async (req, res) => {
+  const b = req.body ?? {};
+  try {
+    if (b.action === 'tap') await Phone.tap(b.x, b.y);
+    else if (b.action === 'hold') await Phone.longPress(b.x, b.y);
+    else if (b.action === 'swipe') await Phone.swipe(b.x, b.y, b.x2, b.y2, b.ms ?? 300);
+    else if (b.action === 'key') await Phone.key(b.key);
+    else if (b.action === 'type') await Phone.type(String(b.text ?? ''));
+    else return res.status(400).json({ error: 'unknown action' });
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ---------- raw terminals ----------
+const server = http.createServer(app);
+const wss = new WebSocketServer({ server, path: '/term' });
+wss.on('connection', async (ws, req) => {
+  if (!ours(String(req.headers.origin ?? ''))) return ws.close();
+  if (!isLocal(req) && !loggedIn(req)) return ws.close();
+  const s = sessions.get(new URL(req.url, 'http://x').searchParams.get('sid'));
+  if (!s) return ws.close();
+  s.clients.add(ws);
+  // The terminal's size first (every browser shows it at that size), then the current screen, in
+  // small pieces: one big message was slow on mobile data and could be dropped by the tunnel.
+  const size = s.size ?? { cols: 120, rows: 34 };
+  ws.send(JSON.stringify({ t: 'size', ...size }));
+  const history = s.screen ? s.serializer.serialize({ scrollback: 1500 }) : s.buffer.slice(-120000);
+  for (let i = 0; i < history.length; i += 16000) ws.send(JSON.stringify({ t: 'o', d: history.slice(i, i + 16000) }));
+  if (!s.pty) ws.send(JSON.stringify({ t: 'o', d: '\r\n[Claude is not running in this tab. Press Resume to start it.]\r\n' }));
+  // Cloudflare closes a websocket after ~100 s without traffic: ping every 25 s keeps it open.
+  const ping = setInterval(() => ws.readyState === 1 && ws.ping(), 25000);
+  ws.on('close', () => clearInterval(ping));
+  ws.on('message', (raw) => {
+    let m;
+    try {
+      m = JSON.parse(String(raw));
+    } catch {
+      return;
+    }
+    if (!s.pty) return;
+    if (m.t === 'i') s.pty.write(m.d);
+    else if (m.t === 'r' && m.cols > 10 && m.rows > 5 && m.cols < 500 && m.rows < 300) {
+      // The browser being used sets the size; the others follow it, so all draw the same screen.
+      if (s.size?.cols === m.cols && s.size?.rows === m.rows) return;
+      s.size = { cols: m.cols, rows: m.rows };
+      s.pty.resize(m.cols, m.rows);
+      s.screen?.resize(m.cols, m.rows);
+      for (const c of s.clients) if (c !== ws && c.readyState === 1) c.send(JSON.stringify({ t: 'size', ...s.size }));
+    }
+  });
+  ws.on('close', () => s.clients.delete(ws));
+});
+
+const server6 = http.createServer(app);
+server6.on('upgrade', (req, socket, head) => (wss.shouldHandle(req) ? wss.handleUpgrade(req, socket, head, (ws) => wss.emit('connection', ws, req)) : socket.destroy()));
+server6.on('error', () => {});
+server6.listen(PORT, '::1');
+
+server.listen(PORT, '127.0.0.1', () => {
+  console.log(`Claude Studio: http://localhost:${PORT}`);
+  let delay = 2000;
+  for (const s of MAIN_INSTANCE ? sessions.values() : []) {
+    if (!s.live || s.pty) continue;
+    const p = project(s.project);
+    if (!p) continue;
+    setTimeout(() => {
+      if (s.pty || elsewhere(p, s.uuid)) return;
+      const hasFile = fs.existsSync(transcriptFile(p, s.uuid));
+      startSession(p, { sid: s.sid, name: s.name, effort: s.effort, model: s.model, resume: hasFile ? s.uuid : null, main: s.main, account: s.account });
+      console.log(`resumed tab ${s.name}`);
+    }, dela

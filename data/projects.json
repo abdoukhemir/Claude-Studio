@@ -1,0 +1,25 @@
+[
+ {
+  "id": "potalang",
+  "name": "PotaLang",
+  "type": "app",
+  "path": "E:/ClaudeCode/LangAno",
+  "description": "A language-learning app (Expo / React Native) with Pota the potato and his veggie friends: courses from A1 to C2 in six languages, a story mode, games like Veggie Slice, and recorded character voices.",
+  "created": "2026-10-13T00:00:00.000Z",
+  "statusFile": "E:/ClaudeCode/PotaWorkspace/state/status.json",
+  "agentsDir": "E:/ClaudeCode/PotaWorkspace/public/agents",
+  "extraRoots": [
+   "E:/ClaudeCode/PotaWorkspace"
+  ],
+  "legacyTerm": "ws://127.0.0.1:4545/term",
+  "legacyUrl": "http://localhost:4545"
+ },
+ {
+  "id": "game1",
+  "name": "Game1",
+  "type": "game",
+  "path": "E:/ClaudeCode/Game1",
+  "description": "🎮 Game Concept Document\nPaste this into Claude Code along with your generated image.\n\nGame Title: Swarm Survivor (working title)\nGenre\nTop-down 3D casual mobile shooter / horde survival\n\nCamera & View\nTop-down 3D perspective looking down at the action\nLow-poly, colorful, cartoonish art style (see attached image)\nVertical mobile orientation\nCore Concept\nThe player controls a swarm of identical clone characters that move together as one single unit. The clone count acts as both your firepower and your health. You clear zombie hordes by moving and rotating your swarm around the map, collecting upgrades, and surviving until you reach and defeat the boss.\n\nControls\nLeft joystick: Move the entire swarm (all clones follow the player position in a tight formation)\nRight joystick: Aim direction (clones shoot in that direction)\nClones auto-fire when enemies are in range\nClones (Your \"Health\" & Army)\nYou start each level with 1 clone\nClones are identical copies of the player character\nThey move together as one blob/formation around the player\nNo health bar exists — your clone count IS your health\nWhen a zombie touches a clone, that clone dies instantly and disappears\n0 clones = Game Over\nPickups (Scattered on the map)\n\"+N\" Orbs (e.g., +5, +10, +20): Instantly duplicate your clones by that number\nWeapon Crates: Upgrade ALL clones' weapons at once (pistol → shotgun → machine gun → rocket launcher, etc.)\nEnemies\nZombies: Simple low-poly green enemies that walk toward the swarm\nThey spawn in waves from the edges of the map\nDifferent types: slow walkers, fast runners, big tanks\nOne touch = one clone dies (for all zombie types)\nLevel Flow\nStart alone with a pistol\nKill zombies, collect \"+N\" orbs to grow your swarm\nCollect weapon crates to upgrade all clones at once\nMove and rotate your swarm around the map clearing hordes\nSurvive waves of increasing difficulty\nReach the boss at the end of the level\nKill the boss to win the level\nBoss\nAppears at the end of each level\nMuch bigger than regular zombies\nHas a visible health bar (the ONLY health bar in the game)\nAttacks by charging and spawning mini-zombies\nDefeating the boss = Level Complete\nTechnical Constraints\nMust run on old/low-end phones\nUse free assets (Kenney.nl, itch.io, etc.)\nKeep 3D models low-poly and simple\nNo heavy shaders, no complex particles, no post-processing\nOptimize for performance: object pooling for bullets and zombies",
+  "created": "2026-10-22T14:46:21.763Z"
+ }
+]

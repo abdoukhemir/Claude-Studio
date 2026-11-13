@@ -1,0 +1,11 @@
+{
+ "team": "abdoukh.cloudflareaccess.com",
+ "aud": "",
+ "hosts": [
+  "claude.abderrahmenkhemir.me"
+ ],
+ "email": "abderahmen.khemir@gmail.com",
+ "secret": "0ef5288f0025892ea3e181534f405d30aa5d898124a8d2183252d75dbe7ec796",
+ "salt": "7694fc73f3abbf0e88bba6157f548866",
+ "hash": "ee4a45045e412af37e6fa9c345e3361dff8c1ebb4730640a59ffcf23337b056a"
+}

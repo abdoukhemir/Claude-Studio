@@ -1,0 +1,39 @@
+[
+ {
+  "sid": "potamain01",
+  "uuid": "b380f15d-b04c-4d26-a99c-593d920466f5",
+  "name": "Main",
+  "effort": "medium",
+  "model": "",
+  "main": true,
+  "account": "potalang-app-gmail-com",
+  "live": false
+ },
+ {
+  "sid": "2e4112d369",
+  "uuid": "f63ff45b-b276-4fc8-9d74-699706456fed",
+  "name": "workspace",
+  "effort": "high",
+  "model": "",
+  "account": "potalang-app-gmail-com",
+  "live": true
+ },
+ {
+  "sid": "72ed8a7875",
+  "uuid": "740d41cc-1f86-45e7-abf6-5f2b78efd987",
+  "name": "Main New",
+  "effort": "medium",
+  "model": "",
+  "account": "potalang-app-gmail-com",
+  "live": true
+ },
+ {
+  "sid": "0755e1bba8",
+  "uuid": "eeec57db-5cbe-4e60-ad55-9b2251fe561f",
+  "name": "Main New 2",
+  "effort": "high",
+  "model": "",
+  "account": "potalang-app-gmail-com",
+  "live": true
+ }
+]

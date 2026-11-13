@@ -1,0 +1,65 @@
+﻿<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Claude Studio</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" />
+<link rel="stylesheet" href="studio.css?v=1794595600" />
+</head>
+<body>
+<div class="hub">
+  <div class="hub-head">
+    <div class="grow">
+      <div class="muted small">Your workspace for every project</div>
+      <h1>Claude Studio</h1>
+    </div>
+    <span id="limits" class="row"></span>
+    <a class="btn" href="remote.html" title="Password for https://claude.abderrahmenkhemir.me">Remote access</a>
+    <button class="btn" id="load-btn">Load a project</button>
+    <button class="btn primary" id="new-btn">New project</button>
+  </div>
+  <div class="projects" id="projects"><div class="empty">Loading…</div></div>
+</div>
+
+<div class="modal hidden" id="dlg">
+  <form class="card" id="form">
+    <h2 id="dlg-title">New project</h2>
+    <label class="field">Name
+      <input type="text" name="name" required placeholder="For example: Space Runner" autocomplete="off" />
+    </label>
+    <div class="field">
+      <span>Workspace Elements <span class="hint">(Modular tools enabled for this project — customize anytime)</span></span>
+      <div class="starter-elements-grid" id="starter-elements"></div>
+    </div>
+    <label class="field" id="parent-field">Where to create it
+      <input type="text" name="parent" value="E:/ClaudeCode" />
+      <span class="hint">A new folder with the project's name is made here.</span>
+    </label>
+    <label class="field hidden" id="folder-field">Project folder
+      <input type="text" name="folder" placeholder="E:/Code/MyGame" />
+      <span class="hint">The folder that already holds the project. Claude reads it first and asks before changing anything.</span>
+    </label>
+    <label class="field">Tell Claude about it
+      <textarea name="description" rows="4" placeholder="What it is, who it is for, what you want first. Claude will ask the rest."></textarea>
+    </label>
+    <div class="row" style="gap:14px; flex-wrap:wrap">
+      <label class="field">Effort
+        <select name="effort"><option>low</option><option>medium</option><option selected>high</option><option>xhigh</option><option>max</option></select>
+      </label>
+      <label class="field">Model
+        <select name="model"><option value="">Default</option><option value="opus">Opus</option><option value="sonnet">Sonnet</option><option value="haiku">Haiku</option></select>
+      </label>
+    </div>
+    <div class="muted small" id="form-err"></div>
+    <div class="row" style="justify-content:flex-end">
+      <button type="button" class="btn ghost" id="cancel">Cancel</button>
+      <button type="submit" class="btn primary" id="go">Create and open</button>
+    </div>
+  </form>
+</div>
+<script src="common.js?v=1794595600"></script>
+<script src="hub.js?v=1794595600"></script>
+</body>
+</html>

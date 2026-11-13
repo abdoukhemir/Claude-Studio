@@ -1,0 +1,16 @@
+{
+  "name": "claude-studio",
+  "private": true,
+  "type": "module",
+  "description": "Local workspace for all projects: several Claude sessions per project, agents, files, docs and project panels.",
+  "scripts": {
+    "start": "node server.mjs"
+  },
+  "dependencies": {
+    "@lydell/node-pty": "^1.1.0",
+    "@xterm/addon-serialize": "^0.13.0",
+    "@xterm/headless": "^5.5.0",
+    "express": "^4.21.2",
+    "ws": "^8.18.0"
+  }
+}

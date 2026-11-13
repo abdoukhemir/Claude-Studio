@@ -1,0 +1,124 @@
+2026-10-20T18:54:17.000Z potalang/workspace: Account 2 -> Account3 (97% used; new account 0% used)
+2026-10-20T18:54:17.087Z potalang/Main New: Account 2 -> Account3 (97% used; new account 0% used)
+2026-10-20T20:23:13.170Z potalang/workspace: Account3 -> Account 2 (91% used; new account 0% used)
+2026-10-20T20:27:13.169Z potalang/Main New: Account3 -> Account 2 (95% used; new account 0% used)
+2026-10-20T21:33:55.521Z potalang/Main New: Account 2 -> Account 1 (it hit its usage limit), told Claude to continue
+2026-10-20T21:38:55.501Z potalang/Main New: Account3 -> Account 1 (it hit its usage limit), told Claude to continue
+2026-10-20T21:40:55.490Z potalang/workspace: Account3 -> Account 1 (100% used; new account 80% used)
+2026-10-20T21:46:55.599Z potalang/workspace: Account3 -> Account 1 (it hit its usage limit), told Claude to continue
+2026-10-20T21:48:55.564Z potalang/Main New: Account3 -> Account 1 (100% used; new account 80% used)
+2026-10-20T21:56:55.669Z potalang/workspace: Account3 -> Account 1 (100% used; new account 80% used)
+2026-10-20T21:58:55.639Z potalang/Main New: Account3 -> Account 1 (100% used; new account 80% used)
+2026-10-20T22:08:55.753Z potalang/Main New: Account3 -> Account 1 (100% used; new account 80% used)
+2026-10-21T00:06:33.724Z Account 1 put on hold (put on hold by you)
+2026-10-21T00:43:35.337Z potalang/Main New: Account3 -> Account 2 (it hit its usage limit), told Claude to continue
+2026-10-21T01:00:35.378Z potalang/Main New: Account 2 -> Account3 (it hit its usage limit), told Claude to continue
+2026-10-21T01:02:35.397Z potalang/workspace: Account3 -> Account 2 (100% used; new account 13% used)
+2026-10-21T01:10:35.430Z potalang/Main New: Account3 -> Account 2 (100% used; new account 13% used)
+2026-10-21T10:08:37.432Z potalang/workspace: Account 2 -> Account3 (99% used; new account 26% used)
+2026-10-21T10:08:37.480Z potalang/Main New: Account 2 -> Account3 (99% used; new account 26% used)
+2026-10-21T11:02:54.133Z potalang/Main New: Account3 -> Account 2 (it hit its usage limit), told Claude to continue
+2026-10-21T11:44:54.525Z potalang/Main New: Account 2 -> Account3 (it hit its usage limit), told Claude to continue
+2026-10-21T12:34:59.782Z potalang/Main New: wait-for-reset: the menu had no "continue automatically" option
+2026-10-21T14:33:00.665Z potalang/Main New: wait-for-reset: the menu had no "continue automatically" option
+2026-10-21T16:08:56.495Z potalang/Main New: Account3 -> Account 2 (it hit its usage limit), told Claude to continue
+2026-10-21T16:16:56.400Z Account 2 put on hold (oauth_org_not_allowed)
+2026-10-21T16:16:56.471Z potalang/Main New: Account 2 -> Account3 (Account 2 does not work (oauth_org_not_allowed), put on hold), told Claude to continue
+2026-10-21T17:05:56.792Z potalang/Main New: Account 2 -> Account3 (Account 2 is on hold)
+2026-10-21T17:07:56.773Z Account 2 put on hold (oauth_org_not_allowed)
+2026-10-21T17:07:56.871Z potalang/Main New: Account 2 -> Account3 (Account 2 does not work (oauth_org_not_allowed), put on hold), told Claude to continue
+2026-10-21T21:51:03.918Z potalang/Main New: wait-for-reset: the menu had no "continue automatically" option
+2026-10-21T21:59:03.964Z potalang/Main New: wait-for-reset: the menu had no "continue automatically" option
+2026-10-22T10:37:08.069Z potalang/Main New: wait-for-reset: the menu had no "continue automatically" option
+2026-10-22T11:23:53.779Z Account 2 put on hold (put on hold by you)
+2026-10-22T11:23:54.431Z Account 1 put on hold (put on hold by you)
+2026-10-22T11:26:08.459Z potalang/Main New: wait-for-reset: the menu had no "continue automatically" option
+2026-10-22T11:27:08.471Z potalang/Main New: wait-for-reset: the menu had no "continue automatically" option
+2026-10-22T13:39:04.556Z potalang/Main New: Account3 -> Account 4 (100% used; new account 18% used)
+2026-10-22T14:54:53.165Z potalang/Main New: Account 4 -> Account3 (it hit its usage limit), told Claude to continue
+2026-10-22T14:57:53.086Z game1/Main: Account 4 -> Account3 (it hit its usage limit), told Claude to continue
+2026-10-22T14:58:58.057Z game1/Main: wait-for-reset: the menu had no "continue automatically" option
+2026-10-22T14:59:58.111Z game1/Main: wait-for-reset: the menu had no "continue automatically" option
+2026-10-22T15:00:58.073Z game1/Main: wait-for-reset: the menu had no "continue automatically" option
+2026-10-22T15:01:58.105Z game1/Main: wait-for-reset: the menu had no "continue automatically" option
+2026-10-22T15:40:53.415Z potalang/workspace: Account 4 -> Account3 (100% used; new account 85% used)
+2026-10-22T16:29:53.888Z potalang/Main New: Account3 -> Account 4 (it hit its usage limit), told Claude to continue
+2026-10-22T17:19:54.292Z game1/Main: Account3 -> Account 4 (it hit its usage limit), told Claude to continue
+2026-10-22T18:00:54.420Z potalang/workspace: Account3 -> Account 4 (100% used; new account 32% used)
+2026-10-22T18:46:59.705Z game1/Main: wait-for-reset: the menu had no "continue automatically" option
+2026-10-22T18:47:59.626Z potalang/Main New: wait-for-reset: the menu had no "continue automatically" option
+2026-10-22T19:13:54.879Z potalang/Main New: Account 4 -> Account3 (it hit its usage limit), told Claude to continue
+2026-10-22T20:40:55.528Z potalang/workspace: Account 4 -> Account3 (100% used; new account 98% used)
+2026-10-22T20:59:55.700Z game1/Main: Account3 -> Account 4 (it hit its usage limit), told Claude to continue
+2026-10-22T21:01:00.604Z game1/Main: wait-for-reset: the menu had no "continue automatically" option
+2026-10-22T23:00:56.480Z potalang/workspace: Account3 -> Account 4 (100% used; new account 45% used)
+2026-10-22T23:00:56.554Z potalang/Main New: Account3 -> Account 4 (100% used; new account 45% used)
+2026-10-23T10:31:03.856Z game1/Main: wait-for-reset: the menu had no "continue automatically" option
+2026-10-24T11:17:51.747Z potalang/workspace: Account 4 -> Account 5 (100% used; new account 0% used)
+2026-10-24T11:17:51.873Z potalang/Main New: Account 4 -> Account 5 (100% used; new account 0% used)
+2026-10-24T11:17:52.069Z game1/Main: Account 4 -> Account 5 (100% used; new account 0% used)
+2026-10-24T13:22:57.455Z game1/Main: wait-for-reset: the menu had no "continue automatically" option
+2026-10-24T13:28:57.560Z game1/Main: wait-for-reset: the menu had no "continue automatically" option
+2026-10-24T19:19:12.953Z potalang/Main New: wait-for-reset: the menu had no "continue automatically" option
+2026-10-25T15:57:42.522Z potalang/Main New: wait-for-reset: the menu had no "continue automatically" option
+2026-10-25T17:24:38.275Z potalang/Main New: Account 5 -> Account3 (it hit its usage limit), told Claude to continue
+2026-10-28T15:34:29.776Z Account3 put on hold (oauth_org_not_allowed)
+2026-10-28T15:35:29.787Z Account 4 put on hold (oauth_org_not_allowed)
+2026-10-28T15:35:29.828Z potalang/Main New: Account 4 -> Account 5 (Account 4 does not work (oauth_org_not_allowed), put on hold), told Claude to continue
+2026-10-28T15:36:29.841Z potalang/Main New: Account 4 -> Account 5 (Account 4 is on hold), told Claude to continue
+2026-10-30T13:07:22.456Z potalang/Main New: wait-for-reset: the menu had no "continue automatically" option
+2026-10-30T21:52:28.636Z potalang/Main New: wait-for-reset: the menu had no "continue automatically" option
+2026-10-31T06:45:30.486Z potalang/Main New: wait-for-reset: the menu had no "continue automatically" option
+2026-10-31T14:42:34.142Z potalang/Main New: wait-for-reset: the menu had no "continue automatically" option
+2026-10-31T17:42:35.444Z potalang/Main New: wait-for-reset: the menu had no "continue automatically" option
+2026-10-31T17:51:35.511Z potalang/Main New: wait-for-reset: the menu had no "continue automatically" option
+2026-10-31T18:23:35.773Z potalang/Main New: wait-for-reset: the menu had no "continue automatically" option
+2026-10-31T21:53:37.417Z potalang/Main New: wait-for-reset: the menu had no "continue automatically" option
+2026-10-31T22:00:32.570Z potalang/Main New: Account 5 -> Account 6 (it hit its usage limit), told Claude to continue
+2026-10-31T22:11:32.560Z potalang/Main New: Account 6 -> Account 5 (100% used; new account 79% used)
+2026-11-01T08:17:34.110Z potalang/Main New: Account 5 -> Account 6 (it hit its usage limit), told Claude to continue
+2026-11-01T08:18:33.986Z Account 6 put on hold (authentication_failed)
+2026-11-01T08:18:34.096Z potalang/Main New: Account 6 -> Account 5 (Account 6 does not work (authentication_failed), put on hold), told Claude to continue
+2026-11-01T08:23:34.141Z potalang/Main New: Account 6 -> Account 5 (Account 6 is on hold)
+2026-11-01T08:25:34.244Z potalang/New session: Account 6 -> Account 5 (Account 6 is on hold)
+2026-11-01T08:28:39.045Z potalang/Main New: wait-for-reset: the menu had no "continue automatically" option
+2026-11-01T08:34:39.155Z potalang/Main New: wait-for-reset: the menu had no "continue automatically" option
+2026-11-01T08:50:39.314Z potalang/Main New: wait-for-reset: the menu had no "continue automatically" option
+2026-11-01T20:18:16.519Z potalang/Main New: wait-for-reset: the menu had no "continue automatically" option
+2026-11-01T22:08:16.132Z potalang/Main New: wait-for-reset: the menu had no "continue automatically" option
+2026-11-02T17:15:53.269Z Account 6 put on hold (put on hold by you)
+2026-11-02T21:21:25.464Z Account 3 put on hold (authentication_failed)
+2026-11-02T21:21:25.643Z potalang/Main New: Account 3 -> Account 5 (Account 3 does not work (authentication_failed), put on hold), told Claude to continue
+2026-11-04T14:17:44.796Z Account 3 put on hold (put on hold by you)
+2026-11-04T14:18:38.791Z Account 3 put on hold (put on hold by you)
+2026-11-04T14:18:43.691Z Account 5 put on hold (put on hold by you)
+2026-11-05T16:26:59.261Z potalang/Main New: wait-for-reset: the menu had no "continue automatically" option
+2026-11-05T17:15:59.546Z potalang/Main New: wait-for-reset: the menu had no "continue automatically" option
+2026-11-05T21:54:09.342Z Account 3 put on hold (authentication_failed)
+2026-11-05T21:54:09.434Z potalang/Main New: Account 3 -> Account 5 (Account 3 does not work (authentication_failed), put on hold), told Claude to continue
+2026-11-06T20:47:02.700Z potalang/Main New: wait-for-reset: the menu had no "continue automatically" option
+2026-11-06T22:28:03.343Z potalang/Main New: wait-for-reset: the menu had no "continue automatically" option
+2026-11-07T19:15:18.583Z potalang/Main New: wait-for-reset: the menu had no "continue automatically" option
+2026-11-07T23:08:18.883Z potalang/Main New: wait-for-reset: the menu had no "continue automatically" option
+2026-11-08T17:31:40.573Z potalang/Log in: Account 3: Account 3 -> Account 5 (Account 3 is on hold)
+2026-11-08T17:46:36.729Z Zz Login Test logged in as zz-test@example.invalid
+2026-11-08T17:48:24.925Z Zz Login Test logged in as adilsongucci165@gmail.com (the same login as Account 5)
+2026-11-08T18:13:48.321Z Account 1 put on hold (put on hold by you)
+2026-11-08T18:13:55.120Z chissengueadc put on hold (put on hold by you)
+2026-11-08T18:13:58.252Z fernandodamiaoguemete894 put on hold (put on hold by you)
+2026-11-08T18:13:59.192Z ta-joseph-75mx put on hold (put on hold by you)
+2026-11-08T18:13:59.890Z jokerling123 put on hold (put on hold by you)
+2026-11-08T18:14:03.274Z potalang/workspace: Account 1 -> Account 5 (Account 1 is on hold)
+2026-11-08T18:14:03.319Z potalang/New session: Account 1 -> Account 5 (Account 1 is on hold)
+2026-11-08T20:03:12.038Z Account 5 put on hold (authentication_failed)
+2026-11-08T20:06:41.970Z ta-joseph-75mx put on hold (oauth_org_not_allowed)
+2026-11-13T08:37:04.880Z Account 5 put on hold (logged out)
+2026-11-13T09:03:09.570Z potalang.app@gmail.com logged in as jokerling123@gmail.com
+2026-11-13T09:34:08.234Z potalang.app@gmail.com: permanent key saved (did not work)
+2026-11-13T09:47:39.512Z potalang.app@gmail.com put on hold (authentication_failed)
+2026-11-13T09:47:39.518Z potalang.app@gmail.com put on hold (authentication_failed)
+2026-11-13T13:13:46.050Z potalang/Main New 2: wait-for-reset: the menu had no "continue automatically" option
+2026-11-13T17:33:49.685Z potalang/workspace: wait-for-reset: the menu had no "continue automatically" option
+2026-11-13T17:33:49.728Z potalang/Main New 2: wait-for-reset: the menu had no "continue automatically" option
+2026-11-13T17:35:33.929Z potalang/Main New 2: wait-for-reset: the menu had no "continue automatically" option
+2026-11-13T17:39:33.947Z potalang/Main New 2: wait-for-reset: the menu had no "continue automatically" option

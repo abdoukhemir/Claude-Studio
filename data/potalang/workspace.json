@@ -1,0 +1,13 @@
+{
+ "layout": "split",
+ "previewUrl": "",
+ "panels": [
+  "board",
+  "files",
+  "agents",
+  "docs",
+  "phone",
+  "skills",
+  "env"
+ ]
+}

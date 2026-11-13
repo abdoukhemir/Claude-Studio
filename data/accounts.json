@@ -1,0 +1,16 @@
+{
+ "current": "potalang-app-gmail-com",
+ "list": [
+  {
+   "id": "potalang-app-gmail-com",
+   "label": "potalang.app@gmail.com",
+   "dir": "C:/Users/abder/.claude-accounts/potalang-app-gmail-com",
+   "savedEmail": "potalang.app@gmail.com",
+   "hold": false,
+   "holdReason": null,
+   "heldAt": null
+  }
+ ],
+ "autoSwitch": true,
+ "threshold": 99
+}

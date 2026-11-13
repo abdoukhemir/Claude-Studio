@@ -1,0 +1,12 @@
+[
+ {
+  "sid": "5f8c32461c",
+  "uuid": "f29aba04-6ed8-40e5-85bb-fce00be8aa07",
+  "name": "Main",
+  "effort": "high",
+  "model": "claude-opus-5-5",
+  "main": true,
+  "account": "account-5",
+  "live": false
+ }
+]

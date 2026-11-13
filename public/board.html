@@ -1,0 +1,142 @@
+﻿<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Board · Claude Studio</title>
+<style>
+  html, body, #app { height: 100%; margin: 0; }
+  body { font-family: Inter, system-ui, sans-serif; background: #fff; }
+  @media (prefers-color-scheme: dark) { body { background: #121212; } }
+  #note { position: fixed; left: 50%; bottom: 14px; transform: translateX(-50%); z-index: 10; font-size: 12px; padding: 5px 10px; border-radius: 999px; background: rgba(0, 0, 0, 0.65); color: #fff; pointer-events: none; opacity: 0; transition: opacity 0.3s; }
+  #note.on { opacity: 1; }
+</style>
+<script>window.EXCALIDRAW_ASSET_PATH = 'https://unpkg.com/@excalidraw/excalidraw@0.17.6/dist/';</script>
+<script src="https://unpkg.com/react@18.3.1/umd/react.production.min.js"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@excalidraw/excalidraw@0.17.6/dist/excalidraw.production.min.js"></script>
+</head>
+<body>
+<div id="app"></div>
+<div id="note"></div>
+<script>
+  // The project's whiteboard. Saved to Studio's data folder as files Claude can read (scene.json,
+  // board.png, images/), and Claude's shapes from add.json are added here while the board is open.
+  const PID = new URLSearchParams(location.search).get('id');
+  const { Excalidraw, convertToExcalidrawElements, exportToBlob } = ExcalidrawLib;
+  const dark = matchMedia('(prefers-color-scheme: dark)').matches;
+  let api = null;
+  let known = 0; // version of scene.json this page last wrote or loaded
+  let lastKey = ''; // what the elements looked like at the last save
+  let busy = false;
+  let timer = null;
+  const sentFiles = new Set();
+
+  const call = async (url, opts = {}) => {
+    const r = await fetch(url, { ...opts, headers: opts.body ? { 'Content-Type': 'application/json' } : {} });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(data.error || r.status);
+    return data;
+  };
+  const note = (text) => {
+    const n = document.getElementById('note');
+    n.textContent = text;
+    n.classList.add('on');
+    clearTimeout(note.t);
+    note.t = setTimeout(() => n.classList.remove('on'), 2500);
+  };
+  const keyOf = (els) => els.map((e) => `${e.id}:${e.version}`).join(',');
+  const toDataURL = (blob) => new Promise((r) => { const f = new FileReader(); f.onload = () => r(f.result); f.readAsDataURL(blob); });
+
+  async function save() {
+    if (!api || busy) return void (timer = setTimeout(save, 1000));
+    const all = api.getSceneElementsIncludingDeleted();
+    const key = keyOf(all);
+    if (key === lastKey) return;
+    busy = true;
+    try {
+      const files = api.getFiles();
+      const live = all.filter((e) => !e.isDeleted);
+      let png = null;
+      if (live.length) {
+        const blob = await exportToBlob({ elements: live, files, appState: { exportBackground: true, viewBackgroundColor: '#ffffff', exportWithDarkMode: false }, mimeType: 'image/png', exportPadding: 24, maxWidthOrHeight: 2400 });
+        png = await toDataURL(blob);
+      }
+      const fresh = Object.fromEntries(Object.entries(files).filter(([id]) => !sentFiles.has(id)));
+      const r = await call(`/api/p/${PID}/board`, { method: 'PUT', body: JSON.stringify({ elements: all.filter((e) => !e.isDeleted), appState: { viewBackgroundColor: api.getAppState().viewBackgroundColor }, files: fresh, png }) });
+      Object.keys(fresh).forEach((id) => sentFiles.add(id));
+      known = r.version;
+      lastKey = key;
+    } catch (e) {
+      note(`Not saved: ${e.message}`);
+    } finally {
+      busy = false;
+    }
+  }
+  const onChange = (els) => {
+    if (keyOf(els) === lastKey) return;
+    clearTimeout(timer);
+    timer = setTimeout(save, 1200);
+  };
+
+  /** Image sizes Claude left out: keep the picture's own shape. */
+  const sizeOf = (dataURL) => new Promise((r) => { const i = new Image(); i.onload = () => r([i.naturalWidth, i.naturalHeight]); i.onerror = () => r([300, 200]); i.src = dataURL; });
+
+  async function poll() {
+    if (!api || busy) return;
+    try {
+      const st = await call(`/api/p/${PID}/board/state`);
+      if (st.inbox) {
+        const add = await call(`/api/p/${PID}/board/take`, { method: 'POST', body: '{}' });
+        if (add.error) note(add.error);
+        if (add.elements?.length || add.clear) {
+          const files = Object.values(add.files ?? {});
+          if (files.length) api.addFiles(files);
+          for (const el of add.elements) {
+            if (el.type !== 'image') continue;
+            const [w, h] = await sizeOf(add.files[el.fileId]?.dataURL);
+            if (!el.width && !el.height) (el.width = Math.min(w, 480)), (el.height = (el.width * h) / w);
+            else if (!el.height) el.height = (el.width * h) / w;
+            else if (!el.width) el.width = (el.height * w) / h;
+          }
+          const made = convertToExcalidrawElements(add.elements, { regenerateIds: false });
+          api.updateScene({ elements: add.clear ? made : [...api.getSceneElementsIncludingDeleted(), ...made] });
+          if (made.length) api.scrollToContent(made, { fitToContent: false, animate: true });
+          files.forEach((f) => sentFiles.add(f.id));
+          note(`Claude added ${made.length} item${made.length === 1 ? '' : 's'} to the board`);
+        }
+      } else if (st.version && st.version !== known) {
+        // scene.json was changed by someone else (Claude): load it.
+        const b = await call(`/api/p/${PID}/board`);
+        api.addFiles(Object.values(b.files));
+        Object.keys(b.files).forEach((id) => sentFiles.add(id));
+        api.updateScene({ elements: b.elements });
+        known = b.version;
+        lastKey = keyOf(api.getSceneElementsIncludingDeleted());
+        note('The board was updated');
+      }
+    } catch {}
+  }
+
+  (async () => {
+    const b = await call(`/api/p/${PID}/board`).catch(() => ({ elements: [], files: {}, appState: {} }));
+    known = b.version ?? 0;
+    Object.keys(b.files ?? {}).forEach((id) => sentFiles.add(id));
+    ReactDOM.createRoot(document.getElementById('app')).render(
+      React.createElement(Excalidraw, {
+        excalidrawAPI: (a) => {
+          api = a;
+          setTimeout(() => (lastKey = keyOf(a.getSceneElementsIncludingDeleted())), 500);
+        },
+        initialData: { elements: b.elements, files: b.files, appState: { ...(b.appState ?? {}), theme: dark ? 'dark' : 'light' }, scrollToContent: true },
+        onChange,
+        theme: dark ? 'dark' : 'light',
+        UIOptions: { canvasActions: { loadScene: false, saveToActiveFile: false } },
+      }),
+    );
+    setInterval(poll, 2500);
+    addEventListener('beforeunload', () => api && keyOf(api.getSceneElementsIncludingDeleted()) !== lastKey && save());
+  })();
+</script>
+</body>
+</html>

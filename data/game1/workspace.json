@@ -1,0 +1,11 @@
+{
+ "panels": [
+  "overview",
+  "preview",
+  "board",
+  "files",
+  "docs",
+  "agents"
+ ],
+ "previewUrl": "http://localhost:8060"
+}
